@@ -8,8 +8,10 @@ debug = ["iced/debug"]
 
 [dependencies]
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing = "0.1.40"
 iced = { version = "0.12.1", default-features = false, features = ["tokio"] }
-tokio = { version = "1.16.1", features = ["time"] }
+tokio = { version = "1.16.1", features = ["time", "rt"] }
+bluefang = { path = "../bluefang" }
 
 [profile.dev.package."*"]
 opt-level = 2

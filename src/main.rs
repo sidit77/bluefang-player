@@ -1,27 +1,47 @@
-use iced::{Alignment, Application, Command, Element, Renderer};
+mod bluetooth;
+
+use std::sync::Arc;
+use bluefang::firmware::RealTekFirmwareLoader;
+use bluefang::hci;
+use bluefang::hci::{FirmwareLoader, Hci};
+use iced::{Alignment, Application, Command, Element, Event, Renderer, Subscription, window};
+use iced::event::{listen_with, Status};
 use iced::widget::{button, Column, text};
+use iced::window::{close, Id};
 use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use crate::bluetooth::initialize_hci;
 
 fn main() -> iced::Result {
     tracing_subscriber::registry()
         .with(layer().without_time())
         .with(EnvFilter::from_default_env())
         .init();
-    App::run(iced::Settings::default())
+    Hci::register_firmware_loaders([RealTekFirmwareLoader::new("firmware").boxed()]);
+    App::run(iced::Settings {
+        window: window::Settings {
+            exit_on_close_request: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Message {
+    HciInitialized(Arc<Hci>),
+    HciFailure(Arc<hci::Error>),
+    CloseRequested,
     Increment,
     Decrement,
 }
 
 #[derive(Default)]
 struct App {
+    hci: Option<Arc<Hci>>,
     value: i64,
 }
 
@@ -33,8 +53,9 @@ impl Application for App {
 
     fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
         (Self {
+            hci: None,
             value: 0,
-        }, Command::none())
+        }, initialize_hci())
     }
 
     fn title(&self) -> String {
@@ -50,8 +71,32 @@ impl Application for App {
             Message::Decrement => {
                 self.value -= 1;
                 Command::none()
+            },
+            Message::HciFailure(e) => {
+                panic!("HCI initialization failed: {:?}", e)
+            },
+            Message::HciInitialized(hci) => {
+                self.hci = Some(hci);
+                Command::none()
+            },
+            Message::CloseRequested => {
+                match self.hci.take() {
+                    Some(hci) => Command::perform(async move {
+                        hci.shutdown().await
+                            .unwrap_or_else(|e| tracing::error!("Failed to shut down HCI: {:?}", e));
+                        Message::CloseRequested
+                    }, |msg| msg),
+                    None => close(Id::MAIN)
+                }
             }
         }
+    }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        listen_with(|event, status| match (event, status) {
+            (Event::Window(Id::MAIN, window::Event::CloseRequested), Status::Ignored) => Some(Message::CloseRequested),
+            _ => None
+        })
     }
 
     fn view(&self) -> Element<'_, Self::Message, Self::Theme, Renderer> {
@@ -63,5 +108,6 @@ impl Application for App {
             .align_items(Alignment::Center)
             .into()
     }
+
 }
 
