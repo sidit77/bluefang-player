@@ -1,19 +1,24 @@
-mod bluetooth;
-
+use std::mem::replace;
 use std::sync::Arc;
+
 use bluefang::firmware::RealTekFirmwareLoader;
 use bluefang::hci;
 use bluefang::hci::{FirmwareLoader, Hci};
-use iced::{Alignment, Application, Command, Element, Event, Renderer, Subscription, window};
+use iced::{Application, Command, Element, Event, Length, Renderer, Subscription, window};
+use iced::alignment::{Horizontal, Vertical};
 use iced::event::{listen_with, Status};
-use iced::widget::{button, Column, text};
+use iced::widget::{text, Text};
 use iced::window::{close, Id};
-use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
 use crate::bluetooth::initialize_hci;
+use crate::states::{SubState, Running};
+
+mod bluetooth;
+mod states;
 
 fn main() -> iced::Result {
     tracing_subscriber::registry()
@@ -35,14 +40,18 @@ enum Message {
     HciInitialized(Arc<Hci>),
     HciFailure(Arc<hci::Error>),
     CloseRequested,
-    Increment,
-    Decrement,
+    Running(<Running as SubState>::Message)
 }
 
-#[derive(Default)]
 struct App {
-    hci: Option<Arc<Hci>>,
-    value: i64,
+    state: State
+}
+
+enum State {
+    Initializing,
+    Running(Running),
+    Failed(Arc<hci::Error>),
+    Quitting
 }
 
 impl Application for App {
@@ -53,8 +62,7 @@ impl Application for App {
 
     fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
         (Self {
-            hci: None,
-            value: 0,
+            state: State::Initializing,//State::Failed(Arc::new(hci::Error::Generic("HCI not initialized")))
         }, initialize_hci())
     }
 
@@ -64,50 +72,64 @@ impl Application for App {
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         match message {
-            Message::Increment => {
-                self.value += 1;
-                Command::perform(async { sleep(std::time::Duration::from_secs(1)).await; Message::Decrement }, |msg| msg)
-            }
-            Message::Decrement => {
-                self.value -= 1;
-                Command::none()
-            },
             Message::HciFailure(e) => {
-                panic!("HCI initialization failed: {:?}", e)
+                self.state = State::Failed(e);
+                Command::none()
             },
             Message::HciInitialized(hci) => {
-                self.hci = Some(hci);
-                Command::none()
+                assert!(matches!(&self.state, State::Initializing | State::Failed(_)));
+                let (state, cmd) = Running::new(hci.clone());
+                self.state = State::Running(state);
+                cmd.map(Message::Running)
             },
             Message::CloseRequested => {
-                match self.hci.take() {
-                    Some(hci) => Command::perform(async move {
-                        hci.shutdown().await
-                            .unwrap_or_else(|e| tracing::error!("Failed to shut down HCI: {:?}", e));
-                        Message::CloseRequested
-                    }, |msg| msg),
-                    None => close(Id::MAIN)
+                match replace(&mut self.state, State::Quitting) {
+                    State::Running(running) => Command::perform(running.shutdown(), |_| Message::CloseRequested),
+                    _ => close(Id::MAIN)
                 }
+            }
+            Message::Running(msg) => match &mut self.state {
+                State::Running(running) => running
+                    .update(msg)
+                    .map(Message::Running),
+                _ => Command::none()
             }
         }
     }
 
+    fn view(&self) -> Element<'_, Self::Message, Self::Theme, Renderer> {
+        match &self.state {
+            State::Initializing => centered_text("Initializing...").into(),
+            State::Failed(e) => centered_text(format!("Failed to initialize HCI: {}", e)).into(),
+            State::Quitting => centered_text("Shutting down...").into(),
+            State::Running(running) => running.view().map(Message::Running)
+        }
+    }
+
     fn subscription(&self) -> Subscription<Self::Message> {
-        listen_with(|event, status| match (event, status) {
+        let running_events = match &self.state {
+            State::Running(running) => running
+                .subscription()
+                .map(Message::Running),
+            _ => Subscription::none()
+        };
+        let close_events = listen_with(|event, status| match (event, status) {
             (Event::Window(Id::MAIN, window::Event::CloseRequested), Status::Ignored) => Some(Message::CloseRequested),
             _ => None
-        })
+        });
+        Subscription::batch([close_events, running_events])
     }
 
-    fn view(&self) -> Element<'_, Self::Message, Self::Theme, Renderer> {
-        Column::new()
-            .push(button("Increment").on_press(Message::Increment))
-            .push(text(self.value).size(50))
-            .push(button("Decrement").on_press(Message::Decrement))
-            .padding(20)
-            .align_items(Alignment::Center)
-            .into()
-    }
+}
 
+pub fn centered_text<'a, Theme>(text: impl ToString) -> Text<'a, Theme, Renderer>
+    where
+        Theme: text::StyleSheet
+{
+    Text::new(text.to_string())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .vertical_alignment(Vertical::Center)
+        .horizontal_alignment(Horizontal::Center)
 }
 

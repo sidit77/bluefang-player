@@ -9,9 +9,17 @@ debug = ["iced/debug"]
 [dependencies]
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tracing = "0.1.40"
-iced = { version = "0.12.1", default-features = false, features = ["tokio"] }
+iced = { version = "0.12.1", default-features = false, features = ["tokio", "advanced"] }
 tokio = { version = "1.16.1", features = ["time", "rt"] }
+pin-project-lite = "0.2.14"
 bluefang = { path = "../bluefang" }
+instructor = { git = "https://github.com/sidit77/instructor.git" }
+bytes = "1.6.0"
+cpal = "0.15.3"
+sbc-rs = { git = "https://github.com/sidit77/sbc-rs.git" }
+rubato = { version = "0.15.0", default-features = false }
+ringbuf = "0.4.1"
+portable-atomic = { version = "1", features = ["float"] }
 
 [profile.dev.package."*"]
 opt-level = 2
