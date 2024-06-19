@@ -20,6 +20,7 @@ sbc-rs = { git = "https://github.com/sidit77/sbc-rs.git" }
 rubato = { version = "0.15.0", default-features = false }
 ringbuf = "0.4.1"
 portable-atomic = { version = "1", features = ["float"] }
+souvlaki = "0.7.3"
 
 [profile.dev.package."*"]
 opt-level = 2

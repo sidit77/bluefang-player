@@ -111,8 +111,9 @@ impl SubState for Running {
                 Command::none()
             }
             Message::NewAvrcpSession(session) => {
-                self.remote_control_session = Some(RemoteControlSession::new(session));
-                Command::none()
+                let (state, cmd) = RemoteControlSession::new(session);
+                self.remote_control_session = Some(state);
+                cmd.map(Message::RemoteControlEvent)
             },
             Message::RemoteControlEvent(e) => match &mut self.remote_control_session {
                 Some(rcs) => rcs.update(e).map(Message::RemoteControlEvent),
