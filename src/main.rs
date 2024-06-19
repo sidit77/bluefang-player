@@ -1,4 +1,3 @@
-use std::mem::replace;
 use std::sync::Arc;
 
 use bluefang::firmware::RealTekFirmwareLoader;
@@ -19,6 +18,7 @@ use crate::states::{SubState, Running};
 
 mod bluetooth;
 mod states;
+mod audio;
 
 fn main() -> iced::Result {
     tracing_subscriber::registry()
@@ -35,11 +35,12 @@ fn main() -> iced::Result {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Message {
     HciInitialized(Arc<Hci>),
-    HciFailure(Arc<hci::Error>),
+    HciFailure(hci::Error),
     CloseRequested,
+    ShutdownCompleted,
     Running(<Running as SubState>::Message)
 }
 
@@ -49,9 +50,8 @@ struct App {
 
 enum State {
     Initializing,
-    Running(Running),
-    Failed(Arc<hci::Error>),
-    Quitting
+    Running(Running, bool),
+    Failed(hci::Error)
 }
 
 impl Application for App {
@@ -79,21 +79,28 @@ impl Application for App {
             Message::HciInitialized(hci) => {
                 assert!(matches!(&self.state, State::Initializing | State::Failed(_)));
                 let (state, cmd) = Running::new(hci.clone());
-                self.state = State::Running(state);
+                self.state = State::Running(state, true);
                 cmd.map(Message::Running)
             },
             Message::CloseRequested => {
-                match replace(&mut self.state, State::Quitting) {
-                    State::Running(running) => Command::perform(running.shutdown(), |_| Message::CloseRequested),
+                match &mut self.state {
+                    State::Running(running, active) => match active {
+                        true => {
+                            *active = false;
+                            Command::perform(running.shutdown(), |_| Message::ShutdownCompleted)
+                        },
+                        false => Command::none()
+                    },
                     _ => close(Id::MAIN)
                 }
             }
             Message::Running(msg) => match &mut self.state {
-                State::Running(running) => running
+                State::Running(running, _) => running
                     .update(msg)
                     .map(Message::Running),
                 _ => Command::none()
-            }
+            },
+            Message::ShutdownCompleted => close(Id::MAIN)
         }
     }
 
@@ -101,14 +108,14 @@ impl Application for App {
         match &self.state {
             State::Initializing => centered_text("Initializing...").into(),
             State::Failed(e) => centered_text(format!("Failed to initialize HCI: {}", e)).into(),
-            State::Quitting => centered_text("Shutting down...").into(),
-            State::Running(running) => running.view().map(Message::Running)
+            State::Running(_, false) => centered_text("Shutting down...").into(),
+            State::Running(running, _) => running.view().map(Message::Running)
         }
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
         let running_events = match &self.state {
-            State::Running(running) => running
+            State::Running(running, _) => running
                 .subscription()
                 .map(Message::Running),
             _ => Subscription::none()
@@ -133,3 +140,12 @@ pub fn centered_text<'a, Theme>(text: impl ToString) -> Text<'a, Theme, Renderer
         .horizontal_alignment(Horizontal::Center)
 }
 
+#[macro_export]
+macro_rules! cloned {
+    ([$($vars:ident),+] $e:expr) => {
+        {
+            $( let $vars = $vars.clone(); )+
+            $e
+        }
+    };
+}

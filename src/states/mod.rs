@@ -1,4 +1,5 @@
 mod running;
+mod remote_control;
 
 use iced::{Command, Element, Subscription};
 pub use running::Running;

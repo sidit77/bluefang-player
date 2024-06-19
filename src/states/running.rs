@@ -1,12 +1,21 @@
 use std::collections::BTreeMap;
-use std::future::{Future, ready};
+use std::future::{Future, pending, ready};
 use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use bluefang::a2dp::sbc::SbcMediaCodecInformation;
+use bluefang::a2dp::sdp::A2dpSinkServiceRecord;
+use bluefang::avdtp::{AvdtpBuilder, LocalEndpoint, MediaType, StreamEndpointType, StreamHandlerFactory};
+use bluefang::avdtp::capabilities::Capability;
+use bluefang::avrcp::{Avrcp, AvrcpSession};
+use bluefang::avrcp::sdp::{AvrcpControllerServiceRecord, AvrcpTargetServiceRecord};
 use bluefang::hci;
 use bluefang::hci::connection::{ConnectionEvent, ConnectionEventReceiver};
 use bluefang::hci::consts::{AuthenticationRequirements, IoCapability, LinkKey, LinkType, OobDataPresence, RemoteAddr, Role, Status as HciStatus};
 use bluefang::hci::Hci;
+use bluefang::l2cap::L2capServerBuilder;
+use bluefang::sdp::SdpBuilder;
 use iced::{Command, Element, Renderer, Subscription, Theme};
 use iced::advanced::graphics::futures::{BoxStream, MaybeSend};
 use iced::advanced::Hasher;
@@ -15,8 +24,13 @@ use iced::futures::stream::{empty, once};
 use iced::futures::{StreamExt};
 use iced::widget::{Column, text};
 use instructor::{Buffer, BufferMut};
-use tracing::{error, warn};
+use tracing::{error, trace, warn};
 use bytes::BytesMut;
+use iced::futures::future::join;
+use portable_atomic::AtomicF32;
+use crate::audio::SbcStreamHandler;
+use crate::cloned;
+use crate::states::remote_control::RemoteControlSession;
 use crate::states::SubState;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
@@ -27,38 +41,53 @@ enum ConnectionState {
     Connected
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Message {
     ConnectionEvent(ConnectionEvent),
     LinkKeysLoaded(BTreeMap<RemoteAddr, LinkKey>),
+    NewAvrcpSession(AvrcpSession),
+    RemoteControlEvent(<RemoteControlSession as SubState>::Message),
     Error(Arc<hci::Error>),
 }
 
 pub struct Running {
     hci: Arc<Hci>,
     connection_state: ConnectionState,
-    link_keys: BTreeMap<RemoteAddr, LinkKey>
+    link_keys: BTreeMap<RemoteAddr, LinkKey>,
+    volume: Arc<AtomicF32>,
+    remote_control_session: Option<RemoteControlSession>
 }
 
 const LINK_KEYS_PATH: &str = "../bluefang/link-keys.dat";
 
 impl Running {
     pub fn new(hci: Arc<Hci>) -> (Self, Command<Message>) {
-        (Self {
+        let state = Self {
             hci,
             connection_state: ConnectionState::Disconnected,
             link_keys: Default::default(),
-        }, Command::perform(load_link_keys(LINK_KEYS_PATH), |r| match r {
-            Ok(link_keys) => Message::LinkKeysLoaded(link_keys),
-            Err(e) => Message::Error(Arc::new(e))
-        }))
+            volume: Arc::new(AtomicF32::new(1.0)),
+            remote_control_session: None,
+        };
+        let commands = Command::batch([
+            Command::perform(load_link_keys(LINK_KEYS_PATH), |r| match r {
+                Ok(link_keys) => Message::LinkKeysLoaded(link_keys),
+                Err(e) => Message::Error(Arc::new(e))
+            })
+        ]);
+        (state, commands)
     }
 
-    pub async fn shutdown(self)  {
-        self.hci.shutdown().await
-            .unwrap_or_else(|e| tracing::error!("Failed to shut down HCI: {:?}", e));
-        save_link_keys(LINK_KEYS_PATH, &self.link_keys).await
-            .unwrap_or_else(|e| tracing::error!("Failed to save link keys: {:?}", e));
+    pub fn shutdown(&self) -> impl Future<Output = ()> + 'static {
+        let hci = self.hci.clone();
+        let keys = self.link_keys.clone();
+        async move {
+            hci.shutdown().await
+                .unwrap_or_else(|e| tracing::error!("Failed to shut down HCI: {:?}", e));
+            save_link_keys(LINK_KEYS_PATH, &keys).await
+                .unwrap_or_else(|e| tracing::error!("Failed to save link keys: {:?}", e));
+        }
+
     }
 
 }
@@ -81,19 +110,92 @@ impl SubState for Running {
                 }
                 Command::none()
             }
+            Message::NewAvrcpSession(session) => {
+                self.remote_control_session = Some(RemoteControlSession::new(session));
+                Command::none()
+            },
+            Message::RemoteControlEvent(e) => match &mut self.remote_control_session {
+                Some(rcs) => rcs.update(e).map(Message::RemoteControlEvent),
+                None => Command::none()
+            }
         }
     }
 
     fn view<'a>(&self) -> Element<'a, Self::Message, Theme, Renderer> {
         Column::new()
             .push(text(format!("Connection state: {:?}", self.connection_state)))
+            .push(text(format!("Volume: {:?}", (self.volume.load(Ordering::Relaxed) * 100.0).round())))
+            .push(self.remote_control_session.as_ref().map_or_else(
+                || text("No remote control session").into(),
+                |rcs| rcs.view().map(Message::RemoteControlEvent)
+            ))
             .padding(30.0)
             .into()
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        ConnectionEventWatcher::new(&self.hci)
-            .map(Message::ConnectionEvent)
+        Subscription::batch([
+            ConnectionEventWatcher::new(&self.hci)
+                .map(Message::ConnectionEvent),
+            self.create_l2cap_servers(),
+            self.remote_control_session
+                .as_ref()
+                .map(RemoteControlSession::subscription)
+                .unwrap_or_else(Subscription::none)
+                .map(Message::RemoteControlEvent)
+        ])
+
+    }
+}
+
+impl Running {
+    fn create_l2cap_servers(&self) -> Subscription<Message> {
+        #[derive(Hash)]
+        struct Id;
+
+        let hci = self.hci.clone();
+        let volume = self.volume.clone();
+        iced::subscription::channel(Id, 10, move |mut output| async move {
+            trace!("Spawning L2CAP servers");
+            let l2cap_server = L2capServerBuilder::default()
+                .with_protocol(
+                    SdpBuilder::default()
+                        .with_record(A2dpSinkServiceRecord::new(0x00010001))
+                        .with_record(AvrcpControllerServiceRecord::new(0x00010002))
+                        .with_record(AvrcpTargetServiceRecord::new(0x00010003))
+                        .build()
+                )
+                .with_protocol(Avrcp::new(
+                    move |session| output
+                        .try_send(Message::NewAvrcpSession(session))
+                        .unwrap_or_else(|e| error!("Failed to send new Avrcp session: {:?}", e))
+                ))
+                .with_protocol(
+                    AvdtpBuilder::default()
+                        .with_endpoint(LocalEndpoint {
+                            media_type: MediaType::Audio,
+                            seid: 1,
+                            in_use: Arc::new(AtomicBool::new(false)),
+                            tsep: StreamEndpointType::Sink,
+                            capabilities: vec![
+                                Capability::MediaTransport,
+                                Capability::MediaCodec(SbcMediaCodecInformation::default().into()),
+                            ],
+                            //stream_handler_factory: Box::new(|cap| Box::new(FileDumpHandler::new())),
+                            factory: StreamHandlerFactory::new(cloned!([volume] move |cap| SbcStreamHandler::new(volume.clone(), cap)))
+                        })
+                        .build()
+                )
+                .run(&hci)
+                .unwrap();
+
+            join(l2cap_server, async {
+                hci.set_scan_enabled(true, true).await
+                    .unwrap_or_else(|e| error!("Failed to enable scan: {:?}", e));
+            }).await;
+            trace!("L2CAP servers stopped");
+            pending().await
+        })
     }
 }
 
