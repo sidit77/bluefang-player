@@ -1,13 +1,12 @@
 use std::cell::Cell;
-use std::future::{Future, pending};
+use std::future::{pending};
 use bluefang::avc::PassThroughOp;
 use bluefang::avrcp;
 use bluefang::avrcp::{AvrcpSession, Event, MediaAttributeId, Notification};
 use bluefang::avrcp::notifications::{CurrentTrack, PlaybackStatus};
 use bluefang::utils::{Either2, ResultExt, select2};
 use iced::{Command, Element, Renderer, Subscription, Theme};
-use iced::futures::{FutureExt, SinkExt};
-use iced::futures::future::select;
+use iced::futures::{SinkExt};
 use iced::widget::{Column, text};
 use iced::window::Id;
 use iced::window::raw_window_handle::RawWindowHandle;

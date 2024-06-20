@@ -3,29 +3,42 @@ use std::sync::Arc;
 use bluefang::firmware::RealTekFirmwareLoader;
 use bluefang::hci;
 use bluefang::hci::{FirmwareLoader, Hci};
+use directories::ProjectDirs;
 use iced::{Application, Command, Element, Event, Length, Renderer, Subscription, window};
 use iced::alignment::{Horizontal, Vertical};
 use iced::event::{listen_with, Status};
 use iced::widget::{text, Text};
 use iced::window::{close, Id};
+use once_cell::sync::Lazy;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::bluetooth::initialize_hci;
+use crate::bluetooth::{DownloadFileProvider, initialize_hci};
 use crate::states::{SubState, Running};
 
 mod bluetooth;
 mod states;
 mod audio;
 
+pub static PROJECT_DIRS: Lazy<ProjectDirs> = Lazy::new(|| {
+    ProjectDirs::from("com.github", "sidit77", "bluefang-player")
+        .expect("Failed to get config directories")
+});
+
 fn main() -> iced::Result {
     tracing_subscriber::registry()
         .with(layer().without_time())
         .with(EnvFilter::from_default_env())
         .init();
-    Hci::register_firmware_loaders([RealTekFirmwareLoader::new("firmware").boxed()]);
+    
+    Hci::register_firmware_loaders([
+        RealTekFirmwareLoader::new(DownloadFileProvider {
+            base_url: "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt".to_string(),
+            cache: PROJECT_DIRS.cache_dir().join("rtk_firmware"),
+        }).boxed()
+    ]);
     App::run(iced::Settings {
         window: window::Settings {
             exit_on_close_request: false,

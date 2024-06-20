@@ -1,10 +1,12 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use bluefang::firmware::FileProvider;
 use bluefang::hci::{Error, Hci};
 use bluefang::hci::consts::{AudioVideoClass, ClassOfDevice, DeviceClass, MajorServiceClasses};
 use bluefang::host::usb::{UsbController, UsbHost};
 use iced::Command;
 use tokio::task::spawn_blocking;
-use tracing::{info};
+use tracing::{debug, info};
 use crate::Message;
 
 pub fn initialize_hci() -> Command<Message> {
@@ -34,6 +36,45 @@ async fn initialize_hci_internal() -> Result<Arc<Hci>, Error> {
 
     Ok(host)
 }
+
+#[derive(Debug)]
+pub struct DownloadFileProvider {
+    pub base_url: String,
+    pub cache: PathBuf
+}
+
+impl FileProvider for DownloadFileProvider {
+    async fn get_file(&self, name: &str) -> Option<Vec<u8>> {
+        let path = self.cache.join(name);
+        if !path.exists() {
+            debug!("Could not find {}. Attempting to download file.", name);
+            let url = format!("{}/{}", self.base_url, name);
+            let name = name.to_string();
+            let download = spawn_blocking(move || {
+                minreq::get(&url)
+                    .send()
+                    .map(|res| res.into_bytes())
+                    .inspect_err(|err| debug!("Failed to download {}: {:?}", name, err))
+                    .inspect(|bytes| {
+                        std::fs::create_dir_all(&path.parent().unwrap())
+                            .and_then(|_| std::fs::write(&path, bytes))
+                            .unwrap_or_else(|err| debug!("Failed to write {} to cache: {:?}", name, err))
+                    })
+                    .ok()
+            });
+            download
+                .await
+                .expect("Download task failed")
+        } else {
+            tokio::fs::read(path)
+                .await
+                .inspect_err(|err| debug!("Failed to read file {} from cache: {:?}", name, err))
+                .ok()
+        }
+    }
+}
+
+
 /*
 fn avrcp_session_handler(volume: Arc<AtomicF32>, mut session: AvrcpSession) {
     spawn(async move {
