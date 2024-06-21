@@ -12,6 +12,7 @@ use iced::event::{listen_with, Status};
 use iced::widget::{text, Text};
 use iced::window::{close, Icon, Id};
 use once_cell::sync::Lazy;
+use ron::ser::PrettyConfig;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::filter::Targets;
@@ -28,8 +29,8 @@ mod audio;
 
 /*
 TODO
-    - Implement a settings file and move the paired device db into it
     - Attempt to reconnect the last device on startup
+    - Implement a settings file
     - Harden the audio output
     - AAC support
     - Cover art support
@@ -55,6 +56,8 @@ pub static APP_ICON: Lazy<Icon> = Lazy::new(|| {
     let info = reader.next_frame(&mut buf).unwrap();
     window::icon::from_rgba(buf, info.width, info.height).unwrap()
 });
+
+pub static RON_CONFIG: Lazy<PrettyConfig> = Lazy::new(|| PrettyConfig::new());
 
 fn log_file() -> File {
     let log_file = PROJECT_DIRS

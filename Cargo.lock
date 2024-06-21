@@ -158,6 +158,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
 name = "bindgen"
 version = "0.69.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,6 +194,9 @@ name = "bitflags"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf4b9d6a944f767f8e5e0db018570623c85f3d925ac718db4e06d0187adb21c1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "block"
@@ -236,6 +245,7 @@ dependencies = [
  "nusb",
  "parking_lot 0.12.3",
  "pin-project-lite",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -257,8 +267,10 @@ dependencies = [
  "png",
  "portable-atomic",
  "ringbuf",
+ "ron",
  "rubato",
  "sbc-rs",
+ "serde",
  "souvlaki",
  "tauri-winres",
  "tokio",
@@ -2301,6 +2313,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c65e4c865bc3d2e3294493dff0acf7e6c259d066e34e22059fa9c39645c3636"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "ron"
+version = "0.9.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c0bd893640cac34097a74f0c2389ddd54c62d6a3c635fa93cafe6b6bc19be6a"
+dependencies = [
+ "base64",
+ "bitflags 2.5.0",
+ "serde",
+ "serde_derive",
+ "unicode-ident",
 ]
 
 [[package]]

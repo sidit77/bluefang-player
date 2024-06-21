@@ -19,11 +19,13 @@ tracing = "0.1.40"
 iced = { version = "0.12.1", default-features = false, features = ["tokio", "advanced"] }
 
 tokio = { version = "1.16.1", features = ["time", "rt"] }
-bluefang = { path = "../bluefang" }
+bluefang = { path = "../bluefang", features = ["serde"] }
 
 souvlaki = "0.7.3"
 minreq = { version = "2.11.2", features = ["https"] }
 png = "0.17.13"
+serde = { version = "1", features = ["derive"]}
+ron = "0.9.0-alpha.0"
 
 portable-atomic = { version = "1", features = ["float"] }
 ringbuf = "0.4.1"

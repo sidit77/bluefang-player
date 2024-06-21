@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::{Future, pending, ready};
 use std::hash::Hash;
-use std::path::Path;
+use std::path::{PathBuf};
 use std::sync::Arc;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,48 +25,54 @@ use iced::advanced::subscription::{EventStream, Recipe};
 use iced::futures::stream::{empty, once};
 use iced::futures::{StreamExt};
 use iced::widget::{button, Column, Row, text};
-use instructor::{Buffer, BufferMut};
 use tracing::{debug, error, trace, warn};
-use bytes::BytesMut;
 use iced::border::Radius;
 use iced::futures::future::join;
 use iced::widget::container::Appearance;
+use once_cell::sync::Lazy;
 use portable_atomic::AtomicF32;
+use serde::{Deserialize, Serialize};
 use crate::audio::SbcStreamHandler;
-use crate::{centered_text, cloned, icon};
+use crate::{centered_text, cloned, icon, PROJECT_DIRS, RON_CONFIG};
 use crate::states::remote_control::RemoteControlSession;
 use crate::states::SubState;
 
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
-enum ConnectionState {
-    #[default]
-    Disconnected,
-    Connecting {
-        addr: RemoteAddr,
-        name: Option<String>
-    },
-    Connected {
-        addr: RemoteAddr,
-        name: Option<String>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub addr: RemoteAddr,
+    pub name: Option<String>,
+    pub link_key: LinkKey
+}
+
+impl PairedDevice {
+
+    pub fn new(addr: RemoteAddr) -> Self {
+        Self { addr, name: None, link_key: LinkKey::default() }
+    }
+
+    pub fn name_or_addr(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.addr.to_string())
+    }
+
+    pub fn valid(&self) -> bool {
+        self.link_key != LinkKey::default()
     }
 }
 
-impl ConnectionState {
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            ConnectionState::Disconnected => None,
-            ConnectionState::Connecting { name, .. } |
-            ConnectionState::Connected { name, .. } => name.as_deref()
-        }
-    }
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+enum ConnectionState {
+    #[default]
+    Disconnected,
+    Connecting(RemoteAddr),
+    Connected(RemoteAddr)
+}
 
-    pub fn name_or_addr(&self) -> Option<String> {
+impl ConnectionState {
+    pub fn addr(self) -> Option<RemoteAddr> {
         match self {
-            ConnectionState::Disconnected => None,
-            ConnectionState::Connecting { addr, name } |
-            ConnectionState::Connected { addr, name } => Some(name
-                .clone()
-                .unwrap_or_else(|| addr.to_string()))
+            ConnectionState::Connecting(addr) |
+            ConnectionState::Connected(addr) => Some(addr),
+            _ => None
         }
     }
 }
@@ -80,7 +86,7 @@ pub enum ButtonEvent {
 #[derive(Debug)]
 pub enum Message {
     ConnectionEvent(ConnectionEvent),
-    LinkKeysLoaded(BTreeMap<RemoteAddr, LinkKey>),
+    PairedDevicesLoaded(Vec<PairedDevice>),
     NewAvrcpSession(AvrcpSession),
     RemoteControlEvent(<RemoteControlSession as SubState>::Message),
     Error(Arc<hci::Error>),
@@ -90,25 +96,25 @@ pub enum Message {
 pub struct Running {
     hci: Arc<Hci>,
     connection_state: ConnectionState,
-    link_keys: BTreeMap<RemoteAddr, LinkKey>,
+    paired_devices: BTreeMap<RemoteAddr, PairedDevice>,
     volume: Arc<AtomicF32>,
     remote_control_session: Option<RemoteControlSession>
 }
 
-const LINK_KEYS_PATH: &str = "../bluefang/link-keys.dat";
+static PAIRED_DEVICES_PATH: Lazy<PathBuf> = Lazy::new(|| PROJECT_DIRS.data_dir().join("paired-devices.ron"));
 
 impl Running {
     pub fn new(hci: Arc<Hci>) -> (Self, Command<Message>) {
         let state = Self {
             hci,
             connection_state: ConnectionState::Disconnected,
-            link_keys: Default::default(),
+            paired_devices: Default::default(),
             volume: Arc::new(AtomicF32::new(1.0)),
             remote_control_session: None,
         };
         let commands = Command::batch([
-            Command::perform(load_link_keys(LINK_KEYS_PATH), |r| match r {
-                Ok(link_keys) => Message::LinkKeysLoaded(link_keys),
+            Command::perform(load_paired_devices(), |r| match r {
+                Ok(link_keys) => Message::PairedDevicesLoaded(link_keys),
                 Err(e) => Message::Error(Arc::new(e))
             })
         ]);
@@ -117,11 +123,15 @@ impl Running {
 
     pub fn shutdown(&self) -> impl Future<Output = ()> + 'static {
         let hci = self.hci.clone();
-        let keys = self.link_keys.clone();
+        let keys = self.paired_devices.
+            values()
+            .cloned()
+            .filter(PairedDevice::valid)
+            .collect();
         async move {
             hci.shutdown().await
                 .unwrap_or_else(|e| tracing::error!("Failed to shut down HCI: {:?}", e));
-            save_link_keys(LINK_KEYS_PATH, &keys).await
+            save_link_keys(&keys).await
                 .unwrap_or_else(|e| tracing::error!("Failed to save link keys: {:?}", e));
         }
 
@@ -139,11 +149,11 @@ impl SubState for Running {
                 error!("Error: {:?}", err);
                 Command::none()
             }
-            Message::LinkKeysLoaded(key) => {
-                if !self.link_keys.is_empty() {
+            Message::PairedDevicesLoaded(key) => {
+                if !self.paired_devices.is_empty() {
                     error!("Newer link keys already exist, ignoring loaded keys");
                 } else {
-                    self.link_keys = key;
+                    self.paired_devices = BTreeMap::from_iter(key.into_iter().map(|d| (d.addr, d)));
                 }
                 Command::none()
             }
@@ -186,8 +196,8 @@ impl SubState for Running {
             ConnectionState::Connecting { .. } => "Connecting",
             ConnectionState::Connected { .. } => "Connected"
         }.to_string();
-        if let Some(name) = self.connection_state.name_or_addr() {
-            write!(status, " to {}", name).unwrap();
+        if let Some(device) = self.connection_state.addr().and_then(|a|self.paired_devices.get(&a)) {
+            write!(status, " to {}", device.name_or_addr()).unwrap();
         }
         let mut connection_bar = Row::new()
             .push(text(status)
@@ -312,7 +322,7 @@ impl Running {
         match event {
             ConnectionEvent::ConnectionComplete { status, addr, .. } => {
                 self.connection_state = match status {
-                    HciStatus::Success => ConnectionState::Connected { addr, name: self.connection_state.name().map(String::from) },
+                    HciStatus::Success => ConnectionState::Connected(addr),
                     _ => ConnectionState::Disconnected
                 };
                 Command::none()
@@ -323,7 +333,7 @@ impl Running {
             },
             ConnectionEvent::ConnectionRequest { addr, link_type, .. } => {
                 if link_type == LinkType::Acl && self.connection_state == ConnectionState::Disconnected {
-                    self.connection_state = ConnectionState::Connecting { addr, name: None };
+                    self.connection_state = ConnectionState::Connecting(addr);
                     Command::batch([
                         self.call(|hci| async move { hci.accept_connection_request(addr, Role::Slave).await }),
                         self.call(|hci| async move { hci.request_remote_name(addr, PageScanRepititionMode::R1).await }),
@@ -332,36 +342,32 @@ impl Running {
                     self.call(|hci| async move { hci.reject_connection_request(addr, HciStatus::ConnectionRejectedDueToLimitedResources).await })
                 }
             },
-            ConnectionEvent::RemoteNameRequestComplete { addr: remote_addr, name: remote_name, status } => {
+            ConnectionEvent::RemoteNameRequestComplete { addr, name, status } => {
                 if status != HciStatus::Success {
                     debug!("Remote name request failed: {:?}", status);
                     return Command::none();
                 }
-                match &mut self.connection_state {
-                    ConnectionState::Connecting { addr, name} |
-                    ConnectionState::Connected { addr, name }  => {
-                        if remote_addr == *addr {
-                            *name = Some(remote_name);
-                        } else {
-                            debug!("Remote name request for unexpected address: {:?}", remote_addr);
-                        }
-                    }
-                    _ => debug!("Received remote name response while not connecting or connected")
-                }
+                self.paired_devices.entry(addr)
+                    .or_insert_with(|| PairedDevice::new(addr))
+                    .name = Some(name);
                 Command::none()
             },
             ConnectionEvent::PinCodeRequest { addr} => {
                 self.call(|hci| async move { hci.pin_code_request_reply(addr, "0000").await })
             }
             ConnectionEvent::LinkKeyRequest { addr} => {
-                if let Some(key) = self.link_keys.get(&addr).cloned() {
+                let key = self.paired_devices.get(&addr).map(|d| d.link_key.clone());
+                if let Some(key) = key {
                     self.call(|hci| async move { hci.link_key_present(addr, &key).await })
                 } else {
                     self.call(|hci| async move { hci.link_key_not_present(addr).await })
                 }
             },
             ConnectionEvent::LinkKeyNotification { addr, key, .. } => {
-                self.link_keys.insert(addr, key);
+                self.paired_devices
+                    .entry(addr)
+                    .or_insert_with(|| PairedDevice::new(addr))
+                    .link_key = key;
                 Command::none()
             },
             ConnectionEvent::IoCapabilityRequest { addr } => {
@@ -401,30 +407,21 @@ impl Running {
 
 }
 
-async fn load_link_keys<P: AsRef<Path>>(path: P) -> Result<BTreeMap<RemoteAddr, LinkKey>, hci::Error> {
-    match tokio::fs::read(path).await {
+async fn load_paired_devices() -> Result<Vec<PairedDevice>, hci::Error> {
+    match tokio::fs::read_to_string(PAIRED_DEVICES_PATH.as_path()).await {
         Ok(data) => {
-            let mut data = data.as_slice();
-            let mut result = BTreeMap::new();
-            while !data.is_empty() {
-                let addr: RemoteAddr = data.read_le()?;
-                let key: LinkKey = data.read_le()?;
-                result.insert(addr, key);
-            }
-            Ok(result)
+            ron::de::from_str(&data)
+                .map_err(|_| hci::Error::Generic("Failed to parse paired devices"))
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(err) => Err(err.into())
     }
 }
 
-async fn save_link_keys<P: AsRef<Path>>(path: P, link_keys: &BTreeMap<RemoteAddr, LinkKey>) -> Result<(), hci::Error> {
-    let mut buf = BytesMut::new();
-    for (addr, key) in link_keys {
-        buf.write_le_ref(addr);
-        buf.write_le_ref(key);
-    }
-    tokio::fs::write(path, buf).await?;
+async fn save_link_keys(paired_devices: &Vec<PairedDevice>) -> Result<(), hci::Error> {
+    let text =  ron::ser::to_string_pretty(&paired_devices, RON_CONFIG.clone()).unwrap();
+    tokio::fs::create_dir_all(PAIRED_DEVICES_PATH.as_path().parent().unwrap()).await?;
+    tokio::fs::write(PAIRED_DEVICES_PATH.as_path(), text).await?;
     Ok(())
 }
 
