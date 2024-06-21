@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bluefang::firmware::RealTekFirmwareLoader;
 use bluefang::hci;
 use bluefang::hci::{FirmwareLoader, Hci};
 use directories::ProjectDirs;
-use iced::{Application, Command, Element, Event, Length, Renderer, Subscription, window};
+use iced::{Application, Command, Element, Event, Font, Length, Renderer, Subscription, window};
 use iced::alignment::{Horizontal, Vertical};
 use iced::event::{listen_with, Status};
 use iced::widget::{text, Text};
@@ -44,6 +45,9 @@ fn main() -> iced::Result {
             exit_on_close_request: false,
             ..Default::default()
         },
+        fonts: vec![
+            Cow::Borrowed(include_bytes!("../microns.ttf").as_slice())
+        ],
         ..Default::default()
     })
 }
@@ -150,6 +154,15 @@ pub fn centered_text<'a, Theme>(text: impl ToString) -> Text<'a, Theme, Renderer
         .width(Length::Fill)
         .height(Length::Fill)
         .vertical_alignment(Vertical::Center)
+        .horizontal_alignment(Horizontal::Center)
+}
+
+const ICONS: Font = Font::with_name("Microns");
+
+pub fn icon(unicode: char) -> Text<'static> {
+    text(unicode.to_string())
+        .font(ICONS)
+        .width(20)
         .horizontal_alignment(Horizontal::Center)
 }
 

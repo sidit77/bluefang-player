@@ -3,7 +3,9 @@ use std::future::{Future, pending, ready};
 use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
+use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering::SeqCst;
 use bluefang::a2dp::sbc::SbcMediaCodecInformation;
 use bluefang::a2dp::sdp::A2dpSinkServiceRecord;
 use bluefang::avdtp::{AvdtpBuilder, LocalEndpoint, MediaType, StreamEndpointType, StreamHandlerFactory};
@@ -16,29 +18,63 @@ use bluefang::hci::consts::{AuthenticationRequirements, IoCapability, LinkKey, L
 use bluefang::hci::Hci;
 use bluefang::l2cap::L2capServerBuilder;
 use bluefang::sdp::SdpBuilder;
-use iced::{Command, Element, Renderer, Subscription, Theme};
+use iced::{Border, Color, Command, Element, Length, Renderer, Subscription, Theme};
 use iced::advanced::graphics::futures::{BoxStream, MaybeSend};
 use iced::advanced::Hasher;
 use iced::advanced::subscription::{EventStream, Recipe};
 use iced::futures::stream::{empty, once};
 use iced::futures::{StreamExt};
-use iced::widget::{Column, text};
+use iced::widget::{button, Column, Row, text};
 use instructor::{Buffer, BufferMut};
 use tracing::{error, trace, warn};
 use bytes::BytesMut;
+use iced::border::Radius;
 use iced::futures::future::join;
+use iced::widget::container::Appearance;
 use portable_atomic::AtomicF32;
 use crate::audio::SbcStreamHandler;
-use crate::cloned;
+use crate::{centered_text, cloned, icon};
 use crate::states::remote_control::RemoteControlSession;
 use crate::states::SubState;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 enum ConnectionState {
     #[default]
     Disconnected,
-    Connecting,
-    Connected
+    Connecting {
+        addr: RemoteAddr,
+        name: Option<String>
+    },
+    Connected {
+        addr: RemoteAddr,
+        name: Option<String>
+    }
+}
+
+impl ConnectionState {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            ConnectionState::Disconnected => None,
+            ConnectionState::Connecting { name, .. } |
+            ConnectionState::Connected { name, .. } => name.as_deref()
+        }
+    }
+
+    pub fn name_or_addr(&self) -> Option<String> {
+        match self {
+            ConnectionState::Disconnected => None,
+            ConnectionState::Connecting { addr, name } |
+            ConnectionState::Connected { addr, name } => Some(name
+                .clone()
+                .unwrap_or_else(|| addr.to_string()))
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ButtonEvent {
+    IncreaseVolume,
+    DecreaseVolume,
 }
 
 #[derive(Debug)]
@@ -48,6 +84,7 @@ pub enum Message {
     NewAvrcpSession(AvrcpSession),
     RemoteControlEvent(<RemoteControlSession as SubState>::Message),
     Error(Arc<hci::Error>),
+    Button(ButtonEvent)
 }
 
 pub struct Running {
@@ -118,20 +155,85 @@ impl SubState for Running {
             Message::RemoteControlEvent(e) => match &mut self.remote_control_session {
                 Some(rcs) => rcs.update(e).map(Message::RemoteControlEvent),
                 None => Command::none()
-            }
+            },
+            Message::Button(e) => {
+                let d = match e {
+                    ButtonEvent::IncreaseVolume => 0.05,
+                    ButtonEvent::DecreaseVolume => -0.05
+                };
+                let _ = self.volume.fetch_update(SeqCst, SeqCst, |v| Some((v + d).max(0.0).min(1.0)));
+                Command::none()
+            },
         }
     }
 
     fn view<'a>(&self) -> Element<'a, Self::Message, Theme, Renderer> {
+        //Column::new()
+        //    .push(text(format!("Connection state: {:?}", self.connection_state)))
+        //    .push(text(format!("Volume: {:?}", (self.volume.load(Ordering::Relaxed) * 100.0).round())))
+        //    .push(self.remote_control_session.as_ref().map_or_else(
+        //        || text("No remote control session").into(),
+        //        |rcs| rcs.view().map(Message::RemoteControlEvent)
+        //    ))
+        //    .padding(30.0)
+        //    .into()
+
+        let mut status = match self.connection_state {
+            ConnectionState::Disconnected => "Disconnected",
+            ConnectionState::Connecting { .. } => "Connecting",
+            ConnectionState::Connected { .. } => "Connected"
+        }.to_string();
+        if let Some(name) = self.connection_state.name_or_addr() {
+            write!(status, " to {}", name).unwrap();
+        }
+        let mut connection_bar = Row::new()
+            .push(text(status)
+                .size(20)
+                .width(Length::Fill))
+            .spacing(10);
+
+        if let ConnectionState::Connected { .. } = self.connection_state {
+            let volume = self.volume.load(Ordering::Relaxed);
+            let volume_control: Element<_, _, _> = Row::new()
+                .spacing(3)
+                .width(Length::Fixed(300.0))
+                .push(button(icon('\u{e71f}'))
+                    .on_press_maybe((volume > 0.0).then_some(ButtonEvent::DecreaseVolume)))
+                .push(iced::widget::progress_bar(0.0..=1.0, volume))
+                .push(button(icon('\u{e721}'))
+                    .on_press_maybe((volume < 1.0).then_some(ButtonEvent::IncreaseVolume)))
+                .into();
+
+            connection_bar = connection_bar.push(volume_control.map(Message::Button));
+        }
+
+
         Column::new()
-            .push(text(format!("Connection state: {:?}", self.connection_state)))
-            .push(text(format!("Volume: {:?}", (self.volume.load(Ordering::Relaxed) * 100.0).round())))
-            .push(self.remote_control_session.as_ref().map_or_else(
-                || text("No remote control session").into(),
-                |rcs| rcs.view().map(Message::RemoteControlEvent)
-            ))
-            .padding(30.0)
+            .push(connection_bar)
+            .push(iced::widget::container::Container::new(
+                self.remote_control_session.as_ref().map_or_else(
+                || centered_text("No remote control session").into(),
+                |rcs| rcs.view().map(Message::RemoteControlEvent))
+                )
+                .style(Appearance {
+                    //background: Some(Gradient::from(Linear::new(std::f32::consts::PI)
+                    //    .add_stop(0.0, Color::from_rgba(0.0, 0.0, 0.0, 0.0))
+                    //    .add_stop(1.0, Color::from_rgba(0.0, 0.0, 0.0, 0.3))
+                    //).into()),
+                    background: Some(Color::from_rgba8(0, 161, 96, 0.3).into()),
+                    border: Border {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                        width: 1.0,
+                        radius: Radius::from(5.0)
+                    },
+                    ..Default::default()
+                })
+                .width(Length::Fill)
+                .height(Length::Fill))
+            .spacing(10)
+            .padding(10.0)
             .into()
+
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -205,9 +307,9 @@ impl Running {
     fn handle_connection_event(&mut self, event: ConnectionEvent) -> Command<Message> {
         tracing::debug!("Connection event: {:?}", event);
         match event {
-            ConnectionEvent::ConnectionComplete { status, .. } => {
+            ConnectionEvent::ConnectionComplete { status, addr, .. } => {
                 self.connection_state = match status {
-                    HciStatus::Success => ConnectionState::Connected,
+                    HciStatus::Success => ConnectionState::Connected { addr, name: self.connection_state.name().map(String::from) },
                     _ => ConnectionState::Disconnected
                 };
                 Command::none()
@@ -218,7 +320,7 @@ impl Running {
             },
             ConnectionEvent::ConnectionRequest { addr, link_type, .. } => {
                 if link_type == LinkType::Acl && self.connection_state == ConnectionState::Disconnected {
-                    self.connection_state = ConnectionState::Connecting;
+                    self.connection_state = ConnectionState::Connecting { addr, name: None };
                     self.call(|hci| async move { hci.accept_connection_request(addr, Role::Slave).await })
                 } else {
                     self.call(|hci| async move { hci.reject_connection_request(addr, HciStatus::ConnectionRejectedDueToLimitedResources).await })
