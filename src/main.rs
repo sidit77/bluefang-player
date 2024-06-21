@@ -23,6 +23,29 @@ mod bluetooth;
 mod states;
 mod audio;
 
+/*
+TODO
+    - Switch to my fork of cpal
+    - Harden the audio output
+    - Implement a log file
+    - Added a tracing panic hook
+    - Implement the AVRCP <-> Volume interaction
+    - Query the name of the connected device
+    - Implement a settings file and move the paired device db into it
+    - Cover art support
+    - AAC support
+    - Switch to the FFT resampler as I don't use the dynamic resample rate
+    - Attempt to reconnect the last device on startup
+    - Add an app icon
+    - Finish the gui
+        - Implement a dongle selection screen
+        - Implement error screens / popups
+        - Implement a device management screen
+        - Add a disconnect button
+        - Implement the number comparison pairing method
+        - Implement device scanning
+*/
+
 pub static PROJECT_DIRS: Lazy<ProjectDirs> = Lazy::new(|| {
     ProjectDirs::from("com.github", "sidit77", "bluefang-player")
         .expect("Failed to get config directories")
