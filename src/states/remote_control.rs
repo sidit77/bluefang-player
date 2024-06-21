@@ -5,15 +5,16 @@ use std::time::Duration;
 use bluefang::avc::PassThroughOp;
 use bluefang::avrcp;
 use bluefang::avrcp::{AvrcpSession, Event, MediaAttributeId, Notification};
-use bluefang::avrcp::notifications::{CurrentTrack, PlaybackStatus};
+use bluefang::avrcp::notifications::{CurrentTrack, PlaybackPosition, PlaybackStatus};
 use bluefang::utils::{Either2, ResultExt, select2};
 use iced::{Alignment, Command, Element, Font, Length, Renderer, Subscription, Theme};
 use iced::font::Weight;
 use iced::futures::{SinkExt};
+use iced::futures::channel::mpsc::Sender as IcedSender;
 use iced::widget::{button, Column, Row, Space, text};
 use iced::window::Id;
 use iced::window::raw_window_handle::RawWindowHandle;
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info, trace, warn};
 use crate::icon;
@@ -25,6 +26,7 @@ pub enum Message {
     MediaCommandChannel(Sender<PassThroughOp>),
     TrackChanged(Option<MediaInfo>),
     PlaybackStatusChanged(PlaybackStatus),
+    PlaybackPositionChanged(Option<Duration>),
     Button(PassThroughOp)
 }
 
@@ -50,6 +52,7 @@ pub struct RemoteControlSession {
     media_controls: Option<MediaControls>,
     media_commands: Option<Sender<PassThroughOp>>,
     info: Option<MediaInfo>,
+    position: Option<Duration>,
     status: PlaybackStatus
 }
 
@@ -60,9 +63,32 @@ impl RemoteControlSession {
             media_controls: None,
             media_commands: None,
             info: None,
+            position: None,
             status: PlaybackStatus::Stopped,
         };
         (state, Command::none())
+    }
+
+    fn update_media_status(&mut self) {
+        if let Some(controls) = &mut self.media_controls {
+            controls.set_playback(match self.status {
+                PlaybackStatus::Stopped | PlaybackStatus::Error => MediaPlayback::Stopped,
+                PlaybackStatus::Playing | PlaybackStatus::FwdSeek | PlaybackStatus::RevSeek => MediaPlayback::Playing { progress: self.position.map(MediaPosition) },
+                PlaybackStatus::Paused => MediaPlayback::Paused { progress: self.position.map(MediaPosition) },
+            }).unwrap_or_else(|err| warn!("Failed to set playback status: {:?}", err));
+        }
+    }
+
+    fn update_media_info(&mut self) {
+        if let Some(controls) = &mut self.media_controls {
+            controls.set_metadata(MediaMetadata {
+                title: self.info.as_ref().map(|info| info.title.as_str()),
+                album: None,
+                artist: self.info.as_ref().map(|info| info.artist.as_str()),
+                cover_url: None,
+                duration: self.info.as_ref().map(|info| info.duration)
+            }).unwrap_or_else(|err| warn!("Failed to set metadata: {:?}", err));
+        }
     }
 }
 
@@ -109,27 +135,18 @@ impl SubState for RemoteControlSession {
                 Command::none()
             }
             Message::TrackChanged(info) => {
-                if let Some(controls) = &mut self.media_controls {
-                    controls.set_metadata(MediaMetadata {
-                        title: info.as_ref().map(|info| info.title.as_str()),
-                        album: None,
-                        artist: info.as_ref().map(|info| info.artist.as_str()),
-                        cover_url: None,
-                        duration: None,
-                    }).unwrap_or_else(|err| warn!("Failed to set metadata: {:?}", err));
-                }
                 self.info = info;
+                self.update_media_info();
                 Command::none()
             }
             Message::PlaybackStatusChanged(status) => {
-                if let Some(controls) = &mut self.media_controls {
-                    controls.set_playback(match status {
-                        PlaybackStatus::Stopped | PlaybackStatus::Error => MediaPlayback::Stopped,
-                        PlaybackStatus::Playing | PlaybackStatus::FwdSeek | PlaybackStatus::RevSeek => MediaPlayback::Playing { progress: None },
-                        PlaybackStatus::Paused => MediaPlayback::Paused { progress: None },
-                    }).unwrap_or_else(|err| warn!("Failed to set playback status: {:?}", err));
-                }
                 self.status = status;
+                self.update_media_status();
+                Command::none()
+            }
+            Message::PlaybackPositionChanged(pos) => {
+                self.position = pos;
+                self.update_media_status();
                 Command::none()
             }
             Message::Button(op) => {
@@ -158,15 +175,18 @@ impl SubState for RemoteControlSession {
                     .on_press_maybe(enabled.then_some(e)))
                 .map(Element::from))
             .push(Space::new(Length::FillPortion(1), Length::Shrink));
-        let current = Duration::from_secs(30);
-        let end_time = self.info.as_ref().map(|info| Timestamp::new(info.duration, false));
+
+        let current = self.position.unwrap_or_default();
+        let end = self.info.as_ref().and_then(|info| (!info.duration.is_zero()).then_some(info.duration));
+        let end_time = end.map(|time| Timestamp::new(time, false));
         let current_time = end_time.map(|end| Timestamp::new(current, end.has_hours()));
+        let fraction = end.map_or(0.0, |end| current.as_secs_f64() / end.as_secs_f64()) as f32;
 
         let progress = Row::new()
             .align_items(Alignment::Center)
             .spacing(10)
             .push(text(current_time.unwrap_or_default()))
-            .push(iced::widget::progress_bar(0.0..=1.0, 0.5))
+            .push(iced::widget::progress_bar(0.0..=1.0, fraction))
             .push(text(end_time.unwrap_or_default()));
         let info = Column::new()
             .padding([10, 20])
@@ -201,20 +221,13 @@ impl SubState for RemoteControlSession {
             let supported_events = session.get_supported_events().await.unwrap_or_default();
             info!("Supported Events: {:?}", supported_events);
             if supported_events.contains(&CurrentTrack::EVENT_ID) {
-                match retrieve_current_track_info(&session).await {
-                    Ok(msg) => {
-                        let _ = output.send(Message::TrackChanged(msg)).await;
-                    },
-                    Err(err) => warn!("Failed to retrieve current track info: {}", err)
-                }
+                register_current_track_notification(&session, &mut output).await;
             }
             if supported_events.contains(&PlaybackStatus::EVENT_ID) {
-                let playback_status: PlaybackStatus = session.register_notification(None).await
-                    .unwrap_or_else(|err| {
-                        warn!("Failed to register playback status notification: {}", err);
-                        PlaybackStatus::Stopped
-                    });
-                let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+                register_playback_status_notification(&session, &mut output).await;
+            }
+            if supported_events.contains(&PlaybackPosition::EVENT_ID) {
+                register_playback_position_notification(&session, &mut output).await;
             }
             loop {
                 match select2(commands.recv(), session.next_event()).await {
@@ -236,33 +249,54 @@ impl SubState for RemoteControlSession {
                     }
                     Either2::B(Some(event)) => match event {
                         Event::TrackChanged(_) => {
-                            match retrieve_current_track_info(&session).await {
-                                Ok(msg) => {
-                                    let _ = output.send(Message::TrackChanged(msg)).await;
-                                },
-                                Err(err) => warn!("Failed to retrieve current track info: {}", err)
-                            }
+                            register_current_track_notification(&session, &mut output).await;
                         }
                         Event::PlaybackStatusChanged(_) => {
-                            let playback_status: PlaybackStatus = session.register_notification(None).await
-                                .unwrap_or_else(|err| {
-                                    warn!("Failed to register playback status notification: {}", err);
-                                    PlaybackStatus::Stopped
-                                });
-                            let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+                            register_playback_status_notification(&session, &mut output).await;
+                        }
+                        Event::PlaybackPositionChanged(_) => {
+                            register_playback_position_notification(&session, &mut output).await;
                         }
                         Event::VolumeChanged(vol) => {
                             //volume.store(vol, SeqCst);
                             //println!("Volume: {}%", (volume.load(SeqCst) * 100.0).round());
                             println!("Volume: {}%", (vol * 100.0).round());
                         }
-                        _ => {}
                     },
                     _ => break
                 }
             }
             pending().await
         })
+    }
+}
+
+
+
+async fn register_playback_status_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
+    let playback_status: PlaybackStatus = session.register_notification(None).await
+        .unwrap_or_else(|err| {
+            warn!("Failed to register playback status notification: {}", err);
+            PlaybackStatus::Stopped
+        });
+    let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+}
+
+async fn register_playback_position_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
+    let playback_position: PlaybackPosition = session.register_notification(Some(Duration::from_secs(1))).await
+        .unwrap_or_else(|err| {
+            warn!("Failed to register playback position notification: {}", err);
+            Default::default()
+        });
+    let _ = output.send(Message::PlaybackPositionChanged(playback_position.as_option())).await;
+}
+
+async fn register_current_track_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
+    match retrieve_current_track_info(&session).await {
+        Ok(msg) => {
+            let _ = output.send(Message::TrackChanged(msg)).await;
+        },
+        Err(err) => warn!("Failed to retrieve current track info: {}", err)
     }
 }
 
