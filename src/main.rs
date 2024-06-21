@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fs::File;
 use std::sync::Arc;
 
 use bluefang::firmware::RealTekFirmwareLoader;
@@ -11,7 +12,9 @@ use iced::event::{listen_with, Status};
 use iced::widget::{text, Text};
 use iced::window::{close, Id};
 use once_cell::sync::Lazy;
-use tracing_subscriber::EnvFilter;
+use tracing::Level;
+use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -27,8 +30,6 @@ mod audio;
 TODO
     - Switch to my fork of cpal
     - Harden the audio output
-    - Implement a log file
-    - Added a tracing panic hook
     - Implement the AVRCP <-> Volume interaction
     - Query the name of the connected device
     - Implement a settings file and move the paired device db into it
@@ -51,11 +52,30 @@ pub static PROJECT_DIRS: Lazy<ProjectDirs> = Lazy::new(|| {
         .expect("Failed to get config directories")
 });
 
+fn log_file() -> File {
+    let log_file = PROJECT_DIRS
+        .data_local_dir()
+        .join("bluefang-player.log");
+    std::fs::create_dir_all(log_file.parent().unwrap())
+        .expect("Failed to create log directory");
+    File::create(log_file)
+        .expect("Failed to create log file")
+}
+
 fn main() -> iced::Result {
+    let (non_blocking, _guard) = tracing_appender::non_blocking(log_file());
     tracing_subscriber::registry()
-        .with(layer().without_time())
-        .with(EnvFilter::from_default_env())
+        .with(layer()
+            .without_time()
+            .with_filter(EnvFilter::from_default_env()))
+        .with(layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_filter(Targets::new()
+                .with_default(Level::INFO)))
         .init();
+
+    std::panic::set_hook(Box::new(tracing_panic::panic_hook));
     
     Hci::register_firmware_loaders([
         RealTekFirmwareLoader::new(DownloadFileProvider {
