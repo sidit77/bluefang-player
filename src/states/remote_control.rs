@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::fmt::{Display, Formatter};
 use std::future::{pending};
+use std::sync::Arc;
+use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 use bluefang::avc::PassThroughOp;
 use bluefang::avrcp;
@@ -14,6 +16,7 @@ use iced::futures::channel::mpsc::Sender as IcedSender;
 use iced::widget::{button, Column, Row, Space, text};
 use iced::window::Id;
 use iced::window::raw_window_handle::RawWindowHandle;
+use portable_atomic::AtomicF32;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info, trace, warn};
@@ -23,11 +26,12 @@ use crate::states::SubState;
 #[derive(Debug)]
 pub enum Message {
     MediaControlsInitialized(Option<MediaControls>),
-    MediaCommandChannel(Sender<PassThroughOp>),
+    MediaCommandChannel(Sender<RemoteControlCommand>),
     TrackChanged(Option<MediaInfo>),
     PlaybackStatusChanged(PlaybackStatus),
     PlaybackPositionChanged(Option<Duration>),
-    Button(PassThroughOp)
+    Button(PassThroughOp),
+    VolumeChanged
 }
 
 #[derive(Default, Debug, Clone)]
@@ -47,19 +51,27 @@ impl MediaInfo {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum RemoteControlCommand {
+    Op(PassThroughOp),
+    VolumeChanged
+}
+
 pub struct RemoteControlSession {
     session: Cell<Option<AvrcpSession>>,
+    volume: Arc<AtomicF32>,
     media_controls: Option<MediaControls>,
-    media_commands: Option<Sender<PassThroughOp>>,
+    media_commands: Option<Sender<RemoteControlCommand>>,
     info: Option<MediaInfo>,
     position: Option<Duration>,
     status: PlaybackStatus
 }
 
 impl RemoteControlSession {
-    pub fn new(session: AvrcpSession) -> (Self, Command<Message>) {
+    pub fn new(session: AvrcpSession, volume: Arc<AtomicF32>) -> (Self, Command<Message>) {
         let state = Self {
             session: Cell::new(Some(session)),
+            volume,
             media_controls: None,
             media_commands: None,
             info: None,
@@ -90,6 +102,13 @@ impl RemoteControlSession {
             }).unwrap_or_else(|err| warn!("Failed to set metadata: {:?}", err));
         }
     }
+
+    pub fn notify_volume_change(&self) {
+        if let Some(channel) = &self.media_commands  {
+            channel.try_send(RemoteControlCommand::VolumeChanged).ignore();
+        }
+    }
+
 }
 
 impl SubState for RemoteControlSession {
@@ -128,7 +147,7 @@ impl SubState for RemoteControlSession {
                             _ => None
                         };
                         if let Some(cmd) = cmd {
-                            channel.try_send(cmd).ignore();
+                            channel.try_send(RemoteControlCommand::Op(cmd)).ignore();
                         }
                     }).unwrap_or_else(|err| warn!("Failed to attach event handler: {:?}", err));
                 }
@@ -151,10 +170,11 @@ impl SubState for RemoteControlSession {
             }
             Message::Button(op) => {
                 if let Some(channel) = &self.media_commands {
-                    channel.try_send(op).ignore();
+                    channel.try_send(RemoteControlCommand::Op(op)).ignore();
                 }
                 Command::none()
             }
+            Message::VolumeChanged => Command::none()
         }
     }
 
@@ -212,12 +232,17 @@ impl SubState for RemoteControlSession {
 
     fn subscription(&self) -> Subscription<Self::Message> {
         let session = self.session.take();
+        let volume = self.volume.clone();
         #[derive(Hash)]
         struct Id;
         iced::subscription::channel(Id, 100, |mut output| async move {
             let mut session = session.expect("session already taken");
             let (tx, mut commands) = tokio::sync::mpsc::channel(20);
             let _ = output.send(Message::MediaCommandChannel(tx)).await;
+            session
+                .notify_local_volume_change(volume.load(SeqCst))
+                .await
+                .unwrap_or_else(|err| warn!("Failed to notify volume change: {}", err));
             let supported_events = session.get_supported_events().await.unwrap_or_default();
             info!("Supported Events: {:?}", supported_events);
             if supported_events.contains(&CurrentTrack::EVENT_ID) {
@@ -231,21 +256,29 @@ impl SubState for RemoteControlSession {
             }
             loop {
                 match select2(commands.recv(), session.next_event()).await {
-                    Either2::A(Some(op)) => {
-                        trace!("Sending command: {:?}", op);
-                        match session.action(op).await {
-                            Ok(_) if matches!(op, PassThroughOp::Play | PassThroughOp::Pause) => {
-                                let playback_status= match op {
-                                    PassThroughOp::Play => PlaybackStatus::Playing,
-                                    PassThroughOp::Pause => PlaybackStatus::Paused,
-                                    _ => unreachable!()
-                                };
-                                let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+                    Either2::A(Some(cmd)) => {
+                        match cmd {
+                            RemoteControlCommand::Op(op) => {
+                                trace!("Sending command: {:?}", op);
+                                match session.action(op).await {
+                                    Ok(_) if matches!(op, PassThroughOp::Play | PassThroughOp::Pause) => {
+                                        let playback_status= match op {
+                                            PassThroughOp::Play => PlaybackStatus::Playing,
+                                            PassThroughOp::Pause => PlaybackStatus::Paused,
+                                            _ => unreachable!()
+                                        };
+                                        let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+                                    }
+                                    Err(err) => warn!("Failed to send action: {}", err),
+                                    _ => {}
+                                }
                             }
-                            Err(err) => warn!("Failed to send action: {}", err),
-                            _ => {}
+                            RemoteControlCommand::VolumeChanged => {
+                                session.notify_local_volume_change(volume.load(SeqCst))
+                                    .await
+                                    .unwrap_or_else(|err| warn!("Failed to notify volume change: {}", err));
+                            }
                         }
-
                     }
                     Either2::B(Some(event)) => match event {
                         Event::TrackChanged(_) => {
@@ -258,9 +291,8 @@ impl SubState for RemoteControlSession {
                             register_playback_position_notification(&session, &mut output).await;
                         }
                         Event::VolumeChanged(vol) => {
-                            //volume.store(vol, SeqCst);
-                            //println!("Volume: {}%", (volume.load(SeqCst) * 100.0).round());
-                            println!("Volume: {}%", (vol * 100.0).round());
+                            volume.store(vol, SeqCst);
+                            let _ = output.send(Message::VolumeChanged).await;
                         }
                     },
                     _ => break

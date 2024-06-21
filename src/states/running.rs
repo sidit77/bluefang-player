@@ -148,7 +148,7 @@ impl SubState for Running {
                 Command::none()
             }
             Message::NewAvrcpSession(session) => {
-                let (state, cmd) = RemoteControlSession::new(session);
+                let (state, cmd) = RemoteControlSession::new(session, self.volume.clone());
                 self.remote_control_session = Some(state);
                 cmd.map(Message::RemoteControlEvent)
             },
@@ -162,6 +162,9 @@ impl SubState for Running {
                     ButtonEvent::DecreaseVolume => -0.05
                 };
                 let _ = self.volume.fetch_update(SeqCst, SeqCst, |v| Some((v + d).max(0.0).min(1.0)));
+                if let Some(control) = &self.remote_control_session {
+                    control.notify_volume_change();
+                }
                 Command::none()
             },
         }
