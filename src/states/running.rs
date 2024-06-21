@@ -15,7 +15,7 @@ use bluefang::avrcp::sdp::{AvrcpControllerServiceRecord, AvrcpTargetServiceRecor
 use bluefang::hci;
 use bluefang::hci::connection::{ConnectionEvent, ConnectionEventReceiver};
 use bluefang::hci::consts::{AuthenticationRequirements, IoCapability, LinkKey, LinkType, OobDataPresence, RemoteAddr, Role, Status as HciStatus};
-use bluefang::hci::Hci;
+use bluefang::hci::{Hci, PageScanRepititionMode};
 use bluefang::l2cap::L2capServerBuilder;
 use bluefang::sdp::SdpBuilder;
 use iced::{Border, Color, Command, Element, Length, Renderer, Subscription, Theme};
@@ -26,7 +26,7 @@ use iced::futures::stream::{empty, once};
 use iced::futures::{StreamExt};
 use iced::widget::{button, Column, Row, text};
 use instructor::{Buffer, BufferMut};
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 use bytes::BytesMut;
 use iced::border::Radius;
 use iced::futures::future::join;
@@ -321,11 +321,32 @@ impl Running {
             ConnectionEvent::ConnectionRequest { addr, link_type, .. } => {
                 if link_type == LinkType::Acl && self.connection_state == ConnectionState::Disconnected {
                     self.connection_state = ConnectionState::Connecting { addr, name: None };
-                    self.call(|hci| async move { hci.accept_connection_request(addr, Role::Slave).await })
+                    Command::batch([
+                        self.call(|hci| async move { hci.accept_connection_request(addr, Role::Slave).await }),
+                        self.call(|hci| async move { hci.request_remote_name(addr, PageScanRepititionMode::R1).await }),
+                    ])
                 } else {
                     self.call(|hci| async move { hci.reject_connection_request(addr, HciStatus::ConnectionRejectedDueToLimitedResources).await })
                 }
-            }
+            },
+            ConnectionEvent::RemoteNameRequestComplete { addr: remote_addr, name: remote_name, status } => {
+                if status != HciStatus::Success {
+                    debug!("Remote name request failed: {:?}", status);
+                    return Command::none();
+                }
+                match &mut self.connection_state {
+                    ConnectionState::Connecting { addr, name} |
+                    ConnectionState::Connected { addr, name }  => {
+                        if remote_addr == *addr {
+                            *name = Some(remote_name);
+                        } else {
+                            debug!("Remote name request for unexpected address: {:?}", remote_addr);
+                        }
+                    }
+                    _ => debug!("Received remote name response while not connecting or connected")
+                }
+                Command::none()
+            },
             ConnectionEvent::PinCodeRequest { addr} => {
                 self.call(|hci| async move { hci.pin_code_request_reply(addr, "0000").await })
             }
@@ -348,11 +369,13 @@ impl Running {
                     AuthenticationRequirements::DedicatedBondingProtected
                 ).await })
             },
-            ConnectionEvent::IoCapabilityResponse { .. } => Command::none(),
             ConnectionEvent::UserConfirmationRequest { addr, .. } => {
                 self.call(|hci| async move { hci.user_confirmation_request_accept(addr).await })
             },
-            ConnectionEvent::SimplePairingComplete { .. } => Command::none(),
+            ConnectionEvent::IoCapabilityResponse { .. } |
+            ConnectionEvent::SimplePairingComplete { .. } |
+            ConnectionEvent::LinkSuperVisionTimeoutChanged { .. } |
+            ConnectionEvent::EncryptionChanged { .. } => Command::none(),
             other => {
                 warn!("Event not supported: {:?}", other);
                 Command::none()

@@ -29,7 +29,6 @@ mod audio;
 /*
 TODO
     - Implement the AVRCP <-> Volume interaction
-    - Query the name of the connected device
     - Implement a settings file and move the paired device db into it
     - Attempt to reconnect the last device on startup
     - Harden the audio output
