@@ -28,14 +28,12 @@ mod audio;
 
 /*
 TODO
-    - Switch to my fork of cpal
     - Harden the audio output
     - Implement the AVRCP <-> Volume interaction
     - Query the name of the connected device
     - Implement a settings file and move the paired device db into it
     - Cover art support
     - AAC support
-    - Switch to the FFT resampler as I don't use the dynamic resample rate
     - Attempt to reconnect the last device on startup
     - Add an app icon
     - Finish the gui

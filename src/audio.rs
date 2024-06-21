@@ -12,13 +12,13 @@ use ringbuf::{HeapProd, HeapRb};
 use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::traits::Split;
-use rubato::{FastFixedIn, PolynomialDegree, Resampler};
+use rubato::{FftFixedIn, Resampler};
 use sbc_rs::Decoder;
 use tracing::{error, trace};
 
 pub struct SbcStreamHandler {
     audio_session: AudioSession,
-    resampler: FastFixedIn<f32>,
+    resampler: FftFixedIn<f32>,
     decoder: Decoder,
     volume: Arc<AtomicF32>,
     input_buffers: [Vec<f32>; 2],
@@ -33,14 +33,13 @@ impl SbcStreamHandler {
 
         let audio_session = AudioSession::new();
 
-        let resampler = FastFixedIn::<f32>::new(
-            audio_session.config().sample_rate.0 as f64 / source_frequency as f64,
-            1.0,
-            PolynomialDegree::Septic,
+        let resampler = FftFixedIn::<f32>::new(
+            source_frequency as usize,
+            audio_session.config().sample_rate.0 as usize,
             input_size as usize,
+            1,
             2
-        )
-            .unwrap();
+        ).unwrap();
 
         Self {
             decoder: Decoder::new(Vec::new()),
