@@ -10,7 +10,7 @@ use iced::{Application, Command, Element, Event, Font, Length, Renderer, Subscri
 use iced::alignment::{Horizontal, Vertical};
 use iced::event::{listen_with, Status};
 use iced::widget::{text, Text};
-use iced::window::{close, Id};
+use iced::window::{close, Icon, Id};
 use once_cell::sync::Lazy;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -28,14 +28,13 @@ mod audio;
 
 /*
 TODO
-    - Harden the audio output
     - Implement the AVRCP <-> Volume interaction
     - Query the name of the connected device
     - Implement a settings file and move the paired device db into it
-    - Cover art support
-    - AAC support
     - Attempt to reconnect the last device on startup
-    - Add an app icon
+    - Harden the audio output
+    - AAC support
+    - Cover art support
     - Finish the gui
         - Implement a dongle selection screen
         - Implement error screens / popups
@@ -48,6 +47,15 @@ TODO
 pub static PROJECT_DIRS: Lazy<ProjectDirs> = Lazy::new(|| {
     ProjectDirs::from("com.github", "sidit77", "bluefang-player")
         .expect("Failed to get config directories")
+});
+
+pub static APP_ICON: Lazy<Icon> = Lazy::new(|| {
+    let mut decoder = png::Decoder::new(include_bytes!("../assets/icon.png").as_slice());
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    window::icon::from_rgba(buf, info.width, info.height).unwrap()
 });
 
 fn log_file() -> File {
@@ -84,10 +92,11 @@ fn main() -> iced::Result {
     App::run(iced::Settings {
         window: window::Settings {
             exit_on_close_request: false,
+            icon: Some(APP_ICON.clone()),
             ..Default::default()
         },
         fonts: vec![
-            Cow::Borrowed(include_bytes!("../microns.ttf").as_slice())
+            Cow::Borrowed(include_bytes!("../assets/microns.ttf").as_slice())
         ],
         ..Default::default()
     })
