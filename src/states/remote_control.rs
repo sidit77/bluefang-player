@@ -8,7 +8,7 @@ use bluefang::avc::PassThroughOp;
 use bluefang::avrcp;
 use bluefang::avrcp::{AvrcpSession, Event, MediaAttributeId, Notification};
 use bluefang::avrcp::notifications::{CurrentTrack, PlaybackPosition, PlaybackStatus};
-use bluefang::utils::{Either2, ResultExt, select2};
+use bluefang::utils::{Either2, IgnoreableResult, select2};
 use iced::{Alignment, Command, Element, Font, Length, Renderer, Subscription, Theme};
 use iced::font::Weight;
 use iced::futures::{SinkExt};

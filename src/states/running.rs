@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::atomic::Ordering::SeqCst;
+use std::time::SystemTime;
 use bluefang::a2dp::sbc::SbcMediaCodecInformation;
 use bluefang::a2dp::sdp::A2dpSinkServiceRecord;
-use bluefang::avdtp::{AvdtpBuilder, LocalEndpoint, MediaType, StreamEndpointType, StreamHandlerFactory};
+use bluefang::avdtp::{Avdtp, AvdtpBuilder, LocalEndpoint, MediaType, StreamEndpointType, StreamHandlerFactory};
 use bluefang::avdtp::capabilities::Capability;
 use bluefang::avrcp::{Avrcp, AvrcpSession};
 use bluefang::avrcp::sdp::{AvrcpControllerServiceRecord, AvrcpTargetServiceRecord};
@@ -16,8 +17,9 @@ use bluefang::hci;
 use bluefang::hci::connection::{ConnectionEvent, ConnectionEventReceiver};
 use bluefang::hci::consts::{AuthenticationRequirements, IoCapability, LinkKey, LinkType, OobDataPresence, RemoteAddr, Role, Status as HciStatus};
 use bluefang::hci::{Hci, PageScanRepititionMode};
-use bluefang::l2cap::L2capServerBuilder;
+use bluefang::l2cap::{L2capServerBuilder};
 use bluefang::sdp::SdpBuilder;
+use bluefang::utils::{Either2, IgnoreableResult, select2};
 use iced::{Border, Color, Command, Element, Length, Renderer, Subscription, Theme};
 use iced::advanced::graphics::futures::{BoxStream, MaybeSend};
 use iced::advanced::Hasher;
@@ -27,11 +29,12 @@ use iced::futures::{StreamExt};
 use iced::widget::{button, Column, Row, text};
 use tracing::{debug, error, trace, warn};
 use iced::border::Radius;
-use iced::futures::future::join;
+use iced::futures::future::{join};
 use iced::widget::container::Appearance;
 use once_cell::sync::Lazy;
 use portable_atomic::AtomicF32;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use crate::audio::SbcStreamHandler;
 use crate::{centered_text, cloned, icon, PROJECT_DIRS, RON_CONFIG};
 use crate::states::remote_control::RemoteControlSession;
@@ -41,13 +44,14 @@ use crate::states::SubState;
 pub struct PairedDevice {
     pub addr: RemoteAddr,
     pub name: Option<String>,
-    pub link_key: LinkKey
+    pub link_key: LinkKey,
+    pub last_connected: u64
 }
 
 impl PairedDevice {
 
     pub fn new(addr: RemoteAddr) -> Self {
-        Self { addr, name: None, link_key: LinkKey::default() }
+        Self { addr, name: None, link_key: LinkKey::default(), last_connected: 0 }
     }
 
     pub fn name_or_addr(&self) -> String {
@@ -63,24 +67,34 @@ impl PairedDevice {
 enum ConnectionState {
     #[default]
     Disconnected,
-    Connecting(RemoteAddr),
+    Connecting(RemoteAddr, bool),
     Connected(RemoteAddr)
 }
 
 impl ConnectionState {
     pub fn addr(self) -> Option<RemoteAddr> {
         match self {
-            ConnectionState::Connecting(addr) |
+            ConnectionState::Connecting(addr, _) |
             ConnectionState::Connected(addr) => Some(addr),
             _ => None
+        }
+    }
+
+    pub fn is_reconnecting(self) -> bool {
+        match self {
+            ConnectionState::Connecting(_, rc) => rc,
+            _ => {
+                warn!("is_reconnecting called on {:?}", self);
+                false
+            }
         }
     }
 }
 
 #[derive(Debug, Copy, Clone)]
 pub enum ButtonEvent {
-    IncreaseVolume,
-    DecreaseVolume,
+    ModifyVolume(f32),
+    ReconnectTo(RemoteAddr)
 }
 
 #[derive(Debug)]
@@ -89,8 +103,14 @@ pub enum Message {
     PairedDevicesLoaded(Vec<PairedDevice>),
     NewAvrcpSession(AvrcpSession),
     RemoteControlEvent(<RemoteControlSession as SubState>::Message),
+    ServersStarted(UnboundedSender<ServerCommand>),
     Error(Arc<hci::Error>),
     Button(ButtonEvent)
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ServerCommand {
+    ConnectTo(u16)
 }
 
 pub struct Running {
@@ -98,7 +118,8 @@ pub struct Running {
     connection_state: ConnectionState,
     paired_devices: BTreeMap<RemoteAddr, PairedDevice>,
     volume: Arc<AtomicF32>,
-    remote_control_session: Option<RemoteControlSession>
+    remote_control_session: Option<RemoteControlSession>,
+    server_command_sender: Option<UnboundedSender<ServerCommand>>
 }
 
 static PAIRED_DEVICES_PATH: Lazy<PathBuf> = Lazy::new(|| PROJECT_DIRS.data_dir().join("paired-devices.ron"));
@@ -111,6 +132,7 @@ impl Running {
             paired_devices: Default::default(),
             volume: Arc::new(AtomicF32::new(1.0)),
             remote_control_session: None,
+            server_command_sender: None,
         };
         let commands = Command::batch([
             Command::perform(load_paired_devices(), |r| match r {
@@ -149,11 +171,9 @@ impl SubState for Running {
                 error!("Error: {:?}", err);
                 Command::none()
             }
-            Message::PairedDevicesLoaded(key) => {
-                if !self.paired_devices.is_empty() {
-                    error!("Newer link keys already exist, ignoring loaded keys");
-                } else {
-                    self.paired_devices = BTreeMap::from_iter(key.into_iter().map(|d| (d.addr, d)));
+            Message::PairedDevicesLoaded(devices) => {
+                for device in devices {
+                    self.paired_devices.entry(device.addr).or_insert(device);
                 }
                 Command::none()
             }
@@ -166,17 +186,23 @@ impl SubState for Running {
                 Some(rcs) => rcs.update(e).map(Message::RemoteControlEvent),
                 None => Command::none()
             },
-            Message::Button(e) => {
-                let d = match e {
-                    ButtonEvent::IncreaseVolume => 0.05,
-                    ButtonEvent::DecreaseVolume => -0.05
-                };
-                let _ = self.volume.fetch_update(SeqCst, SeqCst, |v| Some((v + d).max(0.0).min(1.0)));
-                if let Some(control) = &self.remote_control_session {
-                    control.notify_volume_change();
+            Message::Button(e) => match e {
+                ButtonEvent::ModifyVolume(d) => {
+                    let _ = self.volume.fetch_update(SeqCst, SeqCst, |v| Some((v + d).max(0.0).min(1.0)));
+                    if let Some(control) = &self.remote_control_session {
+                        control.notify_volume_change();
+                    }
+                    Command::none()
                 }
-                Command::none()
+                ButtonEvent::ReconnectTo(addr) => {
+                    self.connection_state = ConnectionState::Connecting(addr, true);
+                    self.call(|hci| async move { hci.create_connection(addr, true).await })
+                }
             },
+            Message::ServersStarted(sender) => {
+                self.server_command_sender = Some(sender);
+                Command::none()
+            }
         }
     }
 
@@ -211,15 +237,23 @@ impl SubState for Running {
                 .spacing(3)
                 .width(Length::Fixed(300.0))
                 .push(button(icon('\u{e71f}'))
-                    .on_press_maybe((volume > 0.0).then_some(ButtonEvent::DecreaseVolume)))
+                    .on_press_maybe((volume > 0.0).then_some(ButtonEvent::ModifyVolume(-0.05))))
                 .push(iced::widget::progress_bar(0.0..=1.0, volume))
                 .push(button(icon('\u{e721}'))
-                    .on_press_maybe((volume < 1.0).then_some(ButtonEvent::IncreaseVolume)))
+                    .on_press_maybe((volume < 1.0).then_some(ButtonEvent::ModifyVolume(0.05))))
                 .into();
 
             connection_bar = connection_bar.push(volume_control.map(Message::Button));
         }
 
+        if let ConnectionState::Disconnected{ .. } = self.connection_state {
+            if let Some(device) = self.paired_devices.values().min_by_key(|d| d.last_connected) {
+                let reconnect_button: Element<_, _, _> = button(text(format!("Reconnect to {}", device.name_or_addr())))
+                    .on_press_maybe(self.server_command_sender.is_some().then_some(ButtonEvent::ReconnectTo(device.addr)))
+                    .into();
+                connection_bar = connection_bar.push(reconnect_button.map(Message::Button));
+            }
+        }
 
         Column::new()
             .push(connection_bar)
@@ -273,7 +307,22 @@ impl Running {
         let volume = self.volume.clone();
         iced::subscription::channel(Id, 10, move |mut output| async move {
             trace!("Spawning L2CAP servers");
-            let l2cap_server = L2capServerBuilder::default()
+            let avdtp: Arc<Avdtp> = AvdtpBuilder::default()
+                .with_endpoint(LocalEndpoint {
+                    media_type: MediaType::Audio,
+                    seid: 1,
+                    in_use: Arc::new(AtomicBool::new(false)),
+                    tsep: StreamEndpointType::Sink,
+                    capabilities: vec![
+                        Capability::MediaTransport,
+                        Capability::MediaCodec(SbcMediaCodecInformation::default().into()),
+                    ],
+                    //stream_handler_factory: Box::new(|cap| Box::new(FileDumpHandler::new())),
+                    factory: StreamHandlerFactory::new(cloned!([volume] move |cap| SbcStreamHandler::new(volume.clone(), cap)))
+                })
+                .build()
+                .into();
+            let mut l2cap_server = L2capServerBuilder::default()
                 .with_protocol(
                     SdpBuilder::default()
                         .with_record(A2dpSinkServiceRecord::new(0x00010001))
@@ -281,35 +330,39 @@ impl Running {
                         .with_record(AvrcpTargetServiceRecord::new(0x00010003))
                         .build()
                 )
-                .with_protocol(Avrcp::new(
+                .with_protocol(Avrcp::new(cloned!([output]
                     move |session| output
                         .try_send(Message::NewAvrcpSession(session))
-                        .unwrap_or_else(|e| error!("Failed to send new Avrcp session: {:?}", e))
+                        .unwrap_or_else(|e| error!("Failed to send new Avrcp session: {:?}", e)))
                 ))
-                .with_protocol(
-                    AvdtpBuilder::default()
-                        .with_endpoint(LocalEndpoint {
-                            media_type: MediaType::Audio,
-                            seid: 1,
-                            in_use: Arc::new(AtomicBool::new(false)),
-                            tsep: StreamEndpointType::Sink,
-                            capabilities: vec![
-                                Capability::MediaTransport,
-                                Capability::MediaCodec(SbcMediaCodecInformation::default().into()),
-                            ],
-                            //stream_handler_factory: Box::new(|cap| Box::new(FileDumpHandler::new())),
-                            factory: StreamHandlerFactory::new(cloned!([volume] move |cap| SbcStreamHandler::new(volume.clone(), cap)))
-                        })
-                        .build()
-                )
+                .with_protocol(avdtp.clone())
                 .run(&hci)
                 .unwrap();
-
-            join(l2cap_server, async {
+            let (tx, mut rx) = unbounded_channel();
+            let server = async move {
+                loop {
+                    match select2(&mut l2cap_server, rx.recv()).await {
+                        Either2::A(_) => {
+                            trace!("L2CAP servers stopped");
+                            break
+                        },
+                        Either2::B(Some(cmd)) => match cmd {
+                            ServerCommand::ConnectTo(handle) => {
+                                debug!("Connecting AVDTP to handle: {}", handle);
+                                avdtp.clone().connect(&mut l2cap_server, handle);
+                            }
+                        },
+                        Either2::B(None) => {}
+                    };
+                }
+            };
+            let finish_setup = async move {
                 hci.set_scan_enabled(true, true).await
                     .unwrap_or_else(|e| error!("Failed to enable scan: {:?}", e));
-            }).await;
-            trace!("L2CAP servers stopped");
+                output.try_send(Message::ServersStarted(tx))
+                    .unwrap_or_else(|e| error!("Failed to send server command sender: {:?}", e));
+            };
+            join(server, finish_setup).await;
             pending().await
         })
     }
@@ -320,12 +373,39 @@ impl Running {
     fn handle_connection_event(&mut self, event: ConnectionEvent) -> Command<Message> {
         tracing::debug!("Connection event: {:?}", event);
         match event {
-            ConnectionEvent::ConnectionComplete { status, addr, .. } => {
+            ConnectionEvent::ConnectionComplete { status, addr, handle, .. } => {
+                let reconnecting = self.connection_state.is_reconnecting();
                 self.connection_state = match status {
                     HciStatus::Success => ConnectionState::Connected(addr),
                     _ => ConnectionState::Disconnected
                 };
-                Command::none()
+                self.paired_devices
+                    .entry(addr)
+                    .or_insert_with(|| PairedDevice::new(addr))
+                    .last_connected = current_unix_time();
+                if reconnecting {
+                    let Some(sender) = self.server_command_sender.clone() else {
+                        error!("Server command sender not available");
+                        return Command::none()
+                    };
+                    self.call(|hci| async move {
+                        let role = hci.discover_role(handle).await?;
+                        if role == Role::Master {
+                            debug!("Requesting role switch");
+                            if let Err(e) = hci.switch_role(addr, Role::Slave).await {
+                                warn!("Failed to switch role: {:?}", e)
+                            }
+                        }
+                        debug!("Requesting authentication");
+                        hci.request_authentication(handle).await?;
+                        debug!("Enabling encryption");
+                        hci.set_encryption(handle, true).await?;
+                        sender.send(ServerCommand::ConnectTo(handle)).ignore();
+                        Ok(())
+                    })
+                } else {
+                    Command::none()
+                }
             },
             ConnectionEvent::DisconnectionComplete { .. } => {
                 self.connection_state = ConnectionState::Disconnected;
@@ -333,7 +413,7 @@ impl Running {
             },
             ConnectionEvent::ConnectionRequest { addr, link_type, .. } => {
                 if link_type == LinkType::Acl && self.connection_state == ConnectionState::Disconnected {
-                    self.connection_state = ConnectionState::Connecting(addr);
+                    self.connection_state = ConnectionState::Connecting(addr, false);
                     Command::batch([
                         self.call(|hci| async move { hci.accept_connection_request(addr, Role::Slave).await }),
                         self.call(|hci| async move { hci.request_remote_name(addr, PageScanRepititionMode::R1).await }),
@@ -405,6 +485,15 @@ impl Running {
         Command::run(stream, |x| x)
     }
 
+}
+
+fn current_unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 async fn load_paired_devices() -> Result<Vec<PairedDevice>, hci::Error> {

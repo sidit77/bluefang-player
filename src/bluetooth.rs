@@ -31,6 +31,7 @@ async fn initialize_hci_internal() -> Result<Arc<Hci>, Error> {
         device_class: DeviceClass::AudioVideo(AudioVideoClass::WearableHeadset),
     };
     host.set_simple_pairing_support(true).await?;
+    //host.set_default_link_policy_settings(LinkPolicy::ROLE_SWITCH).await?;
     host.write_local_name("bluefang").await?;
     host.write_class_of_device(cod).await?;
 

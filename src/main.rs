@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::borrow::Cow;
 use std::fs::File;
 use std::sync::Arc;
@@ -29,7 +31,6 @@ mod audio;
 
 /*
 TODO
-    - Attempt to reconnect the last device on startup
     - Implement a settings file
     - Harden the audio output
     - AAC support
@@ -221,7 +222,8 @@ pub fn icon(unicode: char) -> Text<'static> {
 macro_rules! cloned {
     ([$($vars:ident),+] $e:expr) => {
         {
-            $( let $vars = $vars.clone(); )+
+
+            $( #[allow(unused_mut)] let mut $vars = $vars.clone(); )+
             $e
         }
     };
