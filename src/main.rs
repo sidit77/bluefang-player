@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::fs::File;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bluefang::firmware::RealTekFirmwareLoader;
@@ -15,20 +16,19 @@ use iced::widget::{text, Text};
 use iced::window::{close, Icon, Id};
 use once_cell::sync::Lazy;
 use ron::ser::PrettyConfig;
-use tracing::Level;
 use tracing_subscriber::{EnvFilter, Layer};
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::bluetooth::{DownloadFileProvider, initialize_hci};
+use crate::config::AppSettings;
 use crate::states::{SubState, Running};
 
 mod bluetooth;
 mod states;
 mod audio;
-
+mod config;
 /*
 TODO
     - Implement a settings file
@@ -71,20 +71,25 @@ fn log_file() -> File {
 }
 
 fn main() -> iced::Result {
+    let settings = AppSettings::load();
     let (non_blocking, _guard) = tracing_appender::non_blocking(log_file());
     tracing_subscriber::registry()
         .with(layer()
-            .without_time()
-            .with_filter(EnvFilter::from_default_env()))
-        .with(layer()
             .with_writer(non_blocking)
             .with_ansi(false)
-            .with_filter(Targets::new()
-                .with_default(Level::INFO)))
+            .with_filter(EnvFilter::new(&settings.log_level)))
+        .with(layer()
+            .without_time()
+            .with_filter(EnvFilter::from_default_env()))
         .init();
-
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
-    
+
+    if settings.hci_dump_enabled {
+        hci::btsnoop::set_location(std::env::var_os("BTSNOOP_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PROJECT_DIRS.data_local_dir().join("btlog.snoop")));
+    }
+
     Hci::register_firmware_loaders([
         RealTekFirmwareLoader::new(DownloadFileProvider {
             base_url: "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt".to_string(),
