@@ -13,13 +13,13 @@ use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::traits::Split;
 use rubato::{FftFixedIn, Resampler};
-use sbc_rs::Decoder;
+use sbc_rs::BufferedDecoder;
 use tracing::{error, trace};
 
 pub struct SbcStreamHandler {
     audio_session: AudioSession,
     resampler: FftFixedIn<f32>,
-    decoder: Decoder,
+    decoder: BufferedDecoder,
     volume: Arc<AtomicF32>,
     input_buffers: [Vec<f32>; 2],
     output_buffers: [Vec<f32>; 2],
@@ -42,7 +42,7 @@ impl SbcStreamHandler {
         ).unwrap();
 
         Self {
-            decoder: Decoder::new(Vec::new()),
+            decoder: BufferedDecoder::default(),
             volume,
             input_buffers: from_fn(|_| vec![0f32; resampler.input_frames_max()]),
             output_buffers: from_fn(|_| vec![0f32; resampler.output_frames_max()]),
@@ -103,6 +103,7 @@ impl StreamHandler for SbcStreamHandler {
 
     fn on_data(&mut self, data: Bytes) {
         //TODO actually parse the header to make sure the packets are not fragmented
+        assert_eq!(data.as_ref()[0] & 0x80, 0, "fragmented packets are not supported");
         self.process_frames(&data.as_ref()[1..]);
     }
 }
