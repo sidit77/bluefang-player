@@ -235,6 +235,7 @@ dependencies = [
 [[package]]
 name = "bluefang"
 version = "0.1.0"
+source = "git+https://github.com/sidit77/bluefang.git#c5fdc16cc1fc2562b8b39ddd3034567b8973f67c"
 dependencies = [
  "bitflags 2.6.0",
  "bytes",

@@ -19,7 +19,8 @@ tracing = "0.1.40"
 iced = { version = "0.12.1", default-features = false, features = ["tokio", "advanced"] }
 
 tokio = { version = "1.16.1", features = ["time", "rt"] }
-bluefang = { path = "../bluefang", features = ["serde"] }
+# bluefang = { path = "../bluefang", features = ["serde"] }
+bluefang = { git = "https://github.com/sidit77/bluefang.git", features = ["serde"] }
 
 souvlaki = "0.7.3"
 minreq = { version = "2.11.2", features = ["https"] }
