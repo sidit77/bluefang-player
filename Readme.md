@@ -2,6 +2,8 @@
 
 A simple program that can turn your computer into a bluetooth speaker.
 
+![image](https://github.com/user-attachments/assets/ef886e99-f85b-4b23-84b6-1b01d034fa37)
+
 
 ## Running
 
