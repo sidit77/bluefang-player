@@ -1,25 +1,27 @@
 use std::cell::Cell;
 use std::fmt::{Display, Formatter};
-use std::future::{pending};
-use std::sync::Arc;
+use std::future::pending;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 use std::time::Duration;
+
 use bluefang::avc::PassThroughOp;
 use bluefang::avrcp;
-use bluefang::avrcp::{AvrcpSession, Event, MediaAttributeId, Notification};
 use bluefang::avrcp::notifications::{CurrentTrack, PlaybackPosition, PlaybackStatus};
-use bluefang::utils::{Either2, IgnoreableResult, select2};
-use iced::{Alignment, Command, Element, Font, Length, Renderer, Subscription, Theme};
+use bluefang::avrcp::{AvrcpSession, Event, MediaAttributeId, Notification};
+use bluefang::utils::{select2, Either2, IgnoreableResult};
 use iced::font::Weight;
-use iced::futures::{SinkExt};
 use iced::futures::channel::mpsc::Sender as IcedSender;
-use iced::widget::{button, Column, Row, Space, text};
-use iced::window::Id;
+use iced::futures::SinkExt;
+use iced::widget::{button, text, Column, Row, Space};
 use iced::window::raw_window_handle::RawWindowHandle;
+use iced::window::Id;
+use iced::{Alignment, Command, Element, Font, Length, Renderer, Subscription, Theme};
 use portable_atomic::AtomicF32;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info, trace, warn};
+
 use crate::icon;
 use crate::states::SubState;
 
@@ -76,39 +78,48 @@ impl RemoteControlSession {
             media_commands: None,
             info: None,
             position: None,
-            status: PlaybackStatus::Stopped,
+            status: PlaybackStatus::Stopped
         };
         (state, Command::none())
     }
 
     fn update_media_status(&mut self) {
         if let Some(controls) = &mut self.media_controls {
-            controls.set_playback(match self.status {
-                PlaybackStatus::Stopped | PlaybackStatus::Error => MediaPlayback::Stopped,
-                PlaybackStatus::Playing | PlaybackStatus::FwdSeek | PlaybackStatus::RevSeek => MediaPlayback::Playing { progress: self.position.map(MediaPosition) },
-                PlaybackStatus::Paused => MediaPlayback::Paused { progress: self.position.map(MediaPosition) },
-            }).unwrap_or_else(|err| warn!("Failed to set playback status: {:?}", err));
+            controls
+                .set_playback(match self.status {
+                    PlaybackStatus::Stopped | PlaybackStatus::Error => MediaPlayback::Stopped,
+                    PlaybackStatus::Playing | PlaybackStatus::FwdSeek | PlaybackStatus::RevSeek => MediaPlayback::Playing {
+                        progress: self.position.map(MediaPosition)
+                    },
+                    PlaybackStatus::Paused => MediaPlayback::Paused {
+                        progress: self.position.map(MediaPosition)
+                    }
+                })
+                .unwrap_or_else(|err| warn!("Failed to set playback status: {:?}", err));
         }
     }
 
     fn update_media_info(&mut self) {
         if let Some(controls) = &mut self.media_controls {
-            controls.set_metadata(MediaMetadata {
-                title: self.info.as_ref().map(|info| info.title.as_str()),
-                album: None,
-                artist: self.info.as_ref().map(|info| info.artist.as_str()),
-                cover_url: None,
-                duration: self.info.as_ref().map(|info| info.duration)
-            }).unwrap_or_else(|err| warn!("Failed to set metadata: {:?}", err));
+            controls
+                .set_metadata(MediaMetadata {
+                    title: self.info.as_ref().map(|info| info.title.as_str()),
+                    album: None,
+                    artist: self.info.as_ref().map(|info| info.artist.as_str()),
+                    cover_url: None,
+                    duration: self.info.as_ref().map(|info| info.duration)
+                })
+                .unwrap_or_else(|err| warn!("Failed to set metadata: {:?}", err));
         }
     }
 
     pub fn notify_volume_change(&self) {
-        if let Some(channel) = &self.media_commands  {
-            channel.try_send(RemoteControlCommand::VolumeChanged).ignore();
+        if let Some(channel) = &self.media_commands {
+            channel
+                .try_send(RemoteControlCommand::VolumeChanged)
+                .ignore();
         }
     }
-
 }
 
 impl SubState for RemoteControlSession {
@@ -126,7 +137,7 @@ impl SubState for RemoteControlSession {
                     let controls = MediaControls::new(PlatformConfig {
                         display_name: "Bluefang",
                         dbus_name: "bluefang",
-                        hwnd,
+                        hwnd
                     });
                     if let Err(err) = &controls {
                         error!("Failed to initialize media controls: {:?}", err)
@@ -137,19 +148,24 @@ impl SubState for RemoteControlSession {
             Message::MediaControlsInitialized(controls) => {
                 self.media_controls = controls;
                 if let Some(controls) = &mut self.media_controls {
-                    let channel = self.media_commands.clone().expect("Media command channel not set");
-                    controls.attach(move |event| {
-                        let cmd = match event {
-                            MediaControlEvent::Play => Some(PassThroughOp::Play),
-                            MediaControlEvent::Pause => Some(PassThroughOp::Pause),
-                            MediaControlEvent::Previous => Some(PassThroughOp::Backward),
-                            MediaControlEvent::Next => Some(PassThroughOp::Forward),
-                            _ => None
-                        };
-                        if let Some(cmd) = cmd {
-                            channel.try_send(RemoteControlCommand::Op(cmd)).ignore();
-                        }
-                    }).unwrap_or_else(|err| warn!("Failed to attach event handler: {:?}", err));
+                    let channel = self
+                        .media_commands
+                        .clone()
+                        .expect("Media command channel not set");
+                    controls
+                        .attach(move |event| {
+                            let cmd = match event {
+                                MediaControlEvent::Play => Some(PassThroughOp::Play),
+                                MediaControlEvent::Pause => Some(PassThroughOp::Pause),
+                                MediaControlEvent::Previous => Some(PassThroughOp::Backward),
+                                MediaControlEvent::Next => Some(PassThroughOp::Forward),
+                                _ => None
+                            };
+                            if let Some(cmd) = cmd {
+                                channel.try_send(RemoteControlCommand::Op(cmd)).ignore();
+                            }
+                        })
+                        .unwrap_or_else(|err| warn!("Failed to attach event handler: {:?}", err));
                 }
                 Command::none()
             }
@@ -178,7 +194,7 @@ impl SubState for RemoteControlSession {
         }
     }
 
-    fn  view<'a>(&self) -> Element<'a, Self::Message, Theme, Renderer> {
+    fn view<'a>(&self) -> Element<'a, Self::Message, Theme, Renderer> {
         let (enabled, middle) = match self.status {
             PlaybackStatus::Stopped | PlaybackStatus::Error => (false, ('\u{e71c}', PassThroughOp::Play)),
             PlaybackStatus::FwdSeek | PlaybackStatus::Playing | PlaybackStatus::RevSeek => (true, ('\u{e71d}', PassThroughOp::Pause)),
@@ -187,17 +203,19 @@ impl SubState for RemoteControlSession {
         let controls = Row::new()
             .spacing(30.0)
             .push(Space::new(Length::FillPortion(1), Length::Shrink))
-            .extend([('\u{e774}', PassThroughOp::Backward), middle, ('\u{e775}', PassThroughOp::Forward)]
-                .into_iter()
-                .map(|(i, e)| button(icon(i)
-                    .size(20.0)
-                    .width(Length::Fixed(50.0)))
-                    .on_press_maybe(enabled.then_some(e)))
-                .map(Element::from))
+            .extend(
+                [('\u{e774}', PassThroughOp::Backward), middle, ('\u{e775}', PassThroughOp::Forward)]
+                    .into_iter()
+                    .map(|(i, e)| button(icon(i).size(20.0).width(Length::Fixed(50.0))).on_press_maybe(enabled.then_some(e)))
+                    .map(Element::from)
+            )
             .push(Space::new(Length::FillPortion(1), Length::Shrink));
 
         let current = self.position.unwrap_or_default();
-        let end = self.info.as_ref().and_then(|info| (!info.duration.is_zero()).then_some(info.duration));
+        let end = self
+            .info
+            .as_ref()
+            .and_then(|info| (!info.duration.is_zero()).then_some(info.duration));
         let end_time = end.map(|time| Timestamp::new(time, false));
         let current_time = end_time.map(|end| Timestamp::new(current, end.has_hours()));
         let fraction = end.map_or(0.0, |end| current.as_secs_f64() / end.as_secs_f64()) as f32;
@@ -210,13 +228,25 @@ impl SubState for RemoteControlSession {
             .push(text(end_time.unwrap_or_default()));
         let info = Column::new()
             .padding([10, 20])
-            .push(text(self.info.as_ref().map(|info| info.artist.as_str()).unwrap_or_default()))
-            .push(text(self.info.as_ref().map(|info| info.title.as_str()).unwrap_or("No Track Selected"))
+            .push(text(
+                self.info
+                    .as_ref()
+                    .map(|info| info.artist.as_str())
+                    .unwrap_or_default()
+            ))
+            .push(
+                text(
+                    self.info
+                        .as_ref()
+                        .map(|info| info.title.as_str())
+                        .unwrap_or("No Track Selected")
+                )
                 .font(Font {
                     weight: Weight::Bold,
                     ..Default::default()
                 })
-                .size(25));
+                .size(25)
+            );
 
         let bottom_bar = Column::new()
             .padding(10)
@@ -226,8 +256,7 @@ impl SubState for RemoteControlSession {
             .push(progress)
             .push(controls);
 
-        Element::from(bottom_bar)
-            .map(Message::Button)
+        Element::from(bottom_bar).map(Message::Button)
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -256,30 +285,31 @@ impl SubState for RemoteControlSession {
             }
             loop {
                 match select2(commands.recv(), session.next_event()).await {
-                    Either2::A(Some(cmd)) => {
-                        match cmd {
-                            RemoteControlCommand::Op(op) => {
-                                trace!("Sending command: {:?}", op);
-                                match session.action(op).await {
-                                    Ok(_) if matches!(op, PassThroughOp::Play | PassThroughOp::Pause) => {
-                                        let playback_status= match op {
-                                            PassThroughOp::Play => PlaybackStatus::Playing,
-                                            PassThroughOp::Pause => PlaybackStatus::Paused,
-                                            _ => unreachable!()
-                                        };
-                                        let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
-                                    }
-                                    Err(err) => warn!("Failed to send action: {}", err),
-                                    _ => {}
+                    Either2::A(Some(cmd)) => match cmd {
+                        RemoteControlCommand::Op(op) => {
+                            trace!("Sending command: {:?}", op);
+                            match session.action(op).await {
+                                Ok(_) if matches!(op, PassThroughOp::Play | PassThroughOp::Pause) => {
+                                    let playback_status = match op {
+                                        PassThroughOp::Play => PlaybackStatus::Playing,
+                                        PassThroughOp::Pause => PlaybackStatus::Paused,
+                                        _ => unreachable!()
+                                    };
+                                    let _ = output
+                                        .send(Message::PlaybackStatusChanged(playback_status))
+                                        .await;
                                 }
-                            }
-                            RemoteControlCommand::VolumeChanged => {
-                                session.notify_local_volume_change(volume.load(SeqCst))
-                                    .await
-                                    .unwrap_or_else(|err| warn!("Failed to notify volume change: {}", err));
+                                Err(err) => warn!("Failed to send action: {}", err),
+                                _ => {}
                             }
                         }
-                    }
+                        RemoteControlCommand::VolumeChanged => {
+                            session
+                                .notify_local_volume_change(volume.load(SeqCst))
+                                .await
+                                .unwrap_or_else(|err| warn!("Failed to notify volume change: {}", err));
+                        }
+                    },
                     Either2::B(Some(event)) => match event {
                         Event::TrackChanged(_) => {
                             register_current_track_notification(&session, &mut output).await;
@@ -303,31 +333,37 @@ impl SubState for RemoteControlSession {
     }
 }
 
-
-
 async fn register_playback_status_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
-    let playback_status: PlaybackStatus = session.register_notification(None).await
+    let playback_status: PlaybackStatus = session
+        .register_notification(None)
+        .await
         .unwrap_or_else(|err| {
             warn!("Failed to register playback status notification: {}", err);
             PlaybackStatus::Stopped
         });
-    let _ = output.send(Message::PlaybackStatusChanged(playback_status)).await;
+    let _ = output
+        .send(Message::PlaybackStatusChanged(playback_status))
+        .await;
 }
 
 async fn register_playback_position_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
-    let playback_position: PlaybackPosition = session.register_notification(Some(Duration::from_secs(1))).await
+    let playback_position: PlaybackPosition = session
+        .register_notification(Some(Duration::from_secs(1)))
+        .await
         .unwrap_or_else(|err| {
             warn!("Failed to register playback position notification: {}", err);
             Default::default()
         });
-    let _ = output.send(Message::PlaybackPositionChanged(playback_position.as_option())).await;
+    let _ = output
+        .send(Message::PlaybackPositionChanged(playback_position.as_option()))
+        .await;
 }
 
 async fn register_current_track_notification(session: &AvrcpSession, output: &mut IcedSender<Message>) {
     match retrieve_current_track_info(&session).await {
         Ok(msg) => {
             let _ = output.send(Message::TrackChanged(msg)).await;
-        },
+        }
         Err(err) => warn!("Failed to retrieve current track info: {}", err)
     }
 }
@@ -338,7 +374,11 @@ async fn retrieve_current_track_info(session: &AvrcpSession) -> Result<Option<Me
         CurrentTrack::NotSelected | CurrentTrack::Id(_) => None,
         CurrentTrack::Selected => {
             let attributes = session
-                .get_current_media_attributes(Some(&[MediaAttributeId::Title, MediaAttributeId::ArtistName, MediaAttributeId::PlayingTime]))
+                .get_current_media_attributes(Some(&[
+                    MediaAttributeId::Title,
+                    MediaAttributeId::ArtistName,
+                    MediaAttributeId::PlayingTime
+                ]))
                 .await?;
             MediaInfo {
                 title: attributes
@@ -353,7 +393,8 @@ async fn retrieve_current_track_info(session: &AvrcpSession) -> Result<Option<Me
                     .get(&MediaAttributeId::PlayingTime)
                     .and_then(|time| time.parse::<u64>().ok())
                     .map_or(Duration::ZERO, Duration::from_millis)
-            }.validate()
+            }
+            .validate()
         }
     })
 }
@@ -366,7 +407,6 @@ struct Timestamp {
 }
 
 impl Timestamp {
-
     pub fn new(time: Duration, force_hours: bool) -> Self {
         let mut seconds = time.as_secs();
         let mut minutes = seconds / 60;
@@ -398,7 +438,13 @@ impl Display for Timestamp {
 fn test_timestamp() {
     let info: Option<MediaInfo> = None;
     let current = Duration::from_secs(30);
-    let end_time = info.as_ref().map(|info| Timestamp::new(info.duration, false));
+    let end_time = info
+        .as_ref()
+        .map(|info| Timestamp::new(info.duration, false));
     let current_time = end_time.map(|end| Timestamp::new(current, end.has_hours()));
-    println!("Current Time: {}, End: {}", current_time.unwrap_or_default(), end_time.unwrap_or_default());
+    println!(
+        "Current Time: {}, End: {}",
+        current_time.unwrap_or_default(),
+        end_time.unwrap_or_default()
+    );
 }

@@ -1,17 +1,18 @@
 use std::array::from_fn;
 use std::iter::zip;
-use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
+
 use bluefang::avdtp::capabilities::{Capability, MediaCodecCapability};
 use bluefang::avdtp::StreamHandler;
 use bytes::Bytes;
-use cpal::{default_host, SampleFormat, Stream, StreamConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{default_host, SampleFormat, Stream, StreamConfig};
 use portable_atomic::AtomicF32;
-use ringbuf::{HeapProd, HeapRb};
 use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::traits::Split;
+use ringbuf::{HeapProd, HeapRb};
 use rubato::{FftFixedIn, Resampler};
 use sbc_rs::BufferedDecoder;
 use tracing::{error, trace};
@@ -28,8 +29,7 @@ pub struct SbcStreamHandler {
 
 impl SbcStreamHandler {
     pub fn new(volume: Arc<AtomicF32>, capabilities: &[Capability]) -> Self {
-        let (source_frequency, input_size) = Self::parse_capabilities(capabilities)
-            .expect("Invalid capabilities");
+        let (source_frequency, input_size) = Self::parse_capabilities(capabilities).expect("Invalid capabilities");
 
         let audio_session = AudioSession::new();
 
@@ -39,7 +39,8 @@ impl SbcStreamHandler {
             input_size as usize,
             1,
             2
-        ).unwrap();
+        )
+        .unwrap();
 
         Self {
             decoder: BufferedDecoder::default(),
@@ -135,24 +136,22 @@ impl AudioSession {
         let buffer: Arc<HeapRb<i16>> = Arc::new(HeapRb::new(max_buffer_size));
         let (buffer, mut consumer) = buffer.split();
 
-        let stream = device.build_output_stream(
-            &config,
-            move |data: &mut [i16], _info| {
-                let len = consumer.pop_slice(data);
-                //data[..len].iter_mut().for_each(|d| *d *=  8);
-                data[len..].fill(0);
-            },
-            move |err| {
-                error!("an error occurred on the output stream: {}", err);
-            },
-            None
-        ).unwrap();
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [i16], _info| {
+                    let len = consumer.pop_slice(data);
+                    //data[..len].iter_mut().for_each(|d| *d *=  8);
+                    data[len..].fill(0);
+                },
+                move |err| {
+                    error!("an error occurred on the output stream: {}", err);
+                },
+                None
+            )
+            .unwrap();
 
-        Self {
-            stream,
-            config,
-            buffer
-        }
+        Self { stream, config, buffer }
     }
 
     pub fn play(&self) {
@@ -170,5 +169,4 @@ impl AudioSession {
     pub fn config(&self) -> &StreamConfig {
         &self.config
     }
-
 }
