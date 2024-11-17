@@ -1,6 +1,6 @@
 # Bluefang Player
 
-A simple program that can turn your computer into a bluetooth speaker.
+A simple program that can turn your computer into a bluetooth speaker. Additionally, this program integrates with platform-native media controls and can be controlled using the standard media keys found on my keyboards.
 
 ![image](https://github.com/user-attachments/assets/ef886e99-f85b-4b23-84b6-1b01d034fa37)
 
