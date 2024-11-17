@@ -14,7 +14,7 @@ use ringbuf::producer::Producer;
 use ringbuf::traits::Split;
 use ringbuf::{HeapProd, HeapRb};
 use rubato::{FftFixedIn, Resampler};
-use sbc_rs::{Error as SbcError, Decoder, OutputFormat, Error};
+use sbc_rs::{Decoder, OutputFormat, Error};
 use tracing::{error, trace, warn};
 
 pub struct SbcStreamHandler {
@@ -195,56 +195,4 @@ impl AudioSession {
     pub fn config(&self) -> &StreamConfig {
         &self.config
     }
-}
-
-pub struct BufferedSbcDecoder {
-    decoder: Box<Decoder>,
-    data: Vec<u8>,
-    index: usize,
-    buffer: Vec<i16>
-}
-
-impl Default for BufferedSbcDecoder {
-    fn default() -> Self {
-        Self {
-            decoder: Box::new(Default::default()),
-            data: Vec::new(),
-            index: 0,
-            buffer: vec![0; 2 * Decoder::MAX_SAMPLES],
-        }
-    }
-}
-
-impl BufferedSbcDecoder {
-    pub fn refill_buffer(&mut self, data: &[u8]) {
-        let remaining = self.data.len() - self.index;
-        self.data.copy_within(self.index.., 0);
-        self.data.truncate(remaining);
-        self.index = 0;
-        self.data.extend_from_slice(data);
-    }
-
-    pub fn next_frame_lr(&mut self) -> Option<[&[i16]; 2]> {
-        loop {
-            let remaining = &self.data[self.index..];
-            let (left, right) = self.buffer.split_at_mut(Decoder::MAX_SAMPLES);
-            match self.decoder.decode(remaining, OutputFormat::Planar(left, right)) {
-                Ok(r) => {
-                    self.index += r.bytes_read;
-                    if r.channels == 1 {
-                        return Some([&left[..r.samples_written], &left[..r.samples_written]]);
-                    } else {
-                        return Some([&left[..r.samples_written], &right[..r.samples_written]])
-                    }
-                }
-                Err(SbcError::NotEnoughData { .. }) => return None,
-                Err(SbcError::OutputBufferTooSmall { .. }) => unreachable!(),
-                Err(SbcError::BadData(reason)) => {
-                    // TODO skip to the next syncword
-                    panic!("Failed to decode frame: {:?}", reason);
-                }
-            }
-        }
-    }
-
 }
