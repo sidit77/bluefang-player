@@ -14,14 +14,16 @@ use ringbuf::producer::Producer;
 use ringbuf::traits::Split;
 use ringbuf::{HeapProd, HeapRb};
 use rubato::{FftFixedIn, Resampler};
-use sbc_rs::BufferedDecoder;
-use tracing::{error, trace};
+use sbc_rs::{Error as SbcError, Decoder, OutputFormat, Error};
+use tracing::{error, trace, warn};
 
 pub struct SbcStreamHandler {
     audio_session: AudioSession,
     resampler: FftFixedIn<f32>,
-    decoder: BufferedDecoder,
+    decoder: Box<Decoder>,
     volume: Arc<AtomicF32>,
+    decode_buffer_l: Vec<i16>,
+    decode_buffer_r: Vec<i16>,
     input_buffers: [Vec<f32>; 2],
     output_buffers: [Vec<f32>; 2],
     interleave_buffer: Vec<i16>
@@ -43,8 +45,10 @@ impl SbcStreamHandler {
         .unwrap();
 
         Self {
-            decoder: BufferedDecoder::default(),
+            decoder: Box::new(Decoder::default()),
             volume,
+            decode_buffer_l: vec![0i16; Decoder::MAX_SAMPLES],
+            decode_buffer_r: vec![0i16; Decoder::MAX_SAMPLES],
             input_buffers: from_fn(|_| vec![0f32; resampler.input_frames_max()]),
             output_buffers: from_fn(|_| vec![0f32; resampler.output_frames_max()]),
             interleave_buffer: Vec::with_capacity(2 * resampler.output_frames_max()),
@@ -67,14 +71,32 @@ impl SbcStreamHandler {
         Some((frequency, subbands * block_length))
     }
 
-    fn process_frames(&mut self, data: &[u8]) {
+    fn process_frames(&mut self, data: &[u8], bpp: usize) {
         //println!("buffer: {}", self.audio_session.writer().occupied_len());
-        self.decoder.refill_buffer(data);
-        while let Some(sample) = self.decoder.next_frame_lr() {
-            for (sample, buffer) in zip(sample.into_iter(), self.input_buffers.iter_mut()) {
-                buffer.clear();
-                buffer.extend(sample.iter().map(|s| *s as f32));
+
+        let mut index = 0;
+        while index < data.len() {
+            match self.decoder.decode(&data[index..], OutputFormat::Planar(&mut self.decode_buffer_l, &mut self.decode_buffer_r)) {
+                Ok(status) => {
+                    debug_assert_eq!(status.bytes_read, bpp, "frame size mismatch");
+                    index += status.bytes_read;
+                    self.input_buffers[0].clear();
+                    self.input_buffers[0].extend(self.decode_buffer_l.iter().take(status.samples_written).map(|s| *s as f32));
+                    let right = if status.channels == 1 { &self.decode_buffer_l } else { &self.decode_buffer_r };
+                    self.input_buffers[1].clear();
+                    self.input_buffers[1].extend(right.iter().take(status.samples_written).map(|s| *s as f32));
+                }
+                Err(Error::NotEnoughData { .. }) => {
+                    warn!("Not enough data to decode frame. This should not happen; was the frame incomplete?");
+                    break;
+                },
+                Err(Error::OutputBufferTooSmall { .. }) => unreachable!(),
+                Err(Error::BadData(reason)) => {
+                    error!("Failed to decode frame: {:?}", reason);
+                    index += bpp;
+                }
             }
+
             let (_, len) = self
                 .resampler
                 .process_into_buffer(&mut self.input_buffers, &mut self.output_buffers, None)
@@ -90,6 +112,7 @@ impl SbcStreamHandler {
                 .writer()
                 .push_slice(&self.interleave_buffer);
         }
+
     }
 }
 
@@ -105,7 +128,10 @@ impl StreamHandler for SbcStreamHandler {
     fn on_data(&mut self, data: Bytes) {
         //TODO actually parse the header to make sure the packets are not fragmented
         assert_eq!(data.as_ref()[0] & 0x80, 0, "fragmented packets are not supported");
-        self.process_frames(&data.as_ref()[1..]);
+        let packets = (data.as_ref()[0] & 0x0F) as usize;
+        debug_assert!((data.len() - 1) % packets == 0, "invalid number of packet");
+        let bbp = (data.len() - 1) / packets;
+        self.process_frames(&data.as_ref()[1..], bbp);
     }
 }
 
@@ -169,4 +195,56 @@ impl AudioSession {
     pub fn config(&self) -> &StreamConfig {
         &self.config
     }
+}
+
+pub struct BufferedSbcDecoder {
+    decoder: Box<Decoder>,
+    data: Vec<u8>,
+    index: usize,
+    buffer: Vec<i16>
+}
+
+impl Default for BufferedSbcDecoder {
+    fn default() -> Self {
+        Self {
+            decoder: Box::new(Default::default()),
+            data: Vec::new(),
+            index: 0,
+            buffer: vec![0; 2 * Decoder::MAX_SAMPLES],
+        }
+    }
+}
+
+impl BufferedSbcDecoder {
+    pub fn refill_buffer(&mut self, data: &[u8]) {
+        let remaining = self.data.len() - self.index;
+        self.data.copy_within(self.index.., 0);
+        self.data.truncate(remaining);
+        self.index = 0;
+        self.data.extend_from_slice(data);
+    }
+
+    pub fn next_frame_lr(&mut self) -> Option<[&[i16]; 2]> {
+        loop {
+            let remaining = &self.data[self.index..];
+            let (left, right) = self.buffer.split_at_mut(Decoder::MAX_SAMPLES);
+            match self.decoder.decode(remaining, OutputFormat::Planar(left, right)) {
+                Ok(r) => {
+                    self.index += r.bytes_read;
+                    if r.channels == 1 {
+                        return Some([&left[..r.samples_written], &left[..r.samples_written]]);
+                    } else {
+                        return Some([&left[..r.samples_written], &right[..r.samples_written]])
+                    }
+                }
+                Err(SbcError::NotEnoughData { .. }) => return None,
+                Err(SbcError::OutputBufferTooSmall { .. }) => unreachable!(),
+                Err(SbcError::BadData(reason)) => {
+                    // TODO skip to the next syncword
+                    panic!("Failed to decode frame: {:?}", reason);
+                }
+            }
+        }
+    }
+
 }
