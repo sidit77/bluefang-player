@@ -257,7 +257,7 @@ impl SubState for Running {
             if let Some(device) = self
                 .paired_devices
                 .values()
-                .min_by_key(|d| d.last_connected)
+                .max_by_key(|d| d.last_connected)
             {
                 let reconnect_button: Element<_, _, _> = button(text(format!("Reconnect to {}", device.name_or_addr())))
                     .on_press_maybe(
