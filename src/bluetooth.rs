@@ -11,15 +11,15 @@ use tracing::{debug, info};
 
 use crate::Message;
 
-pub fn initialize_hci() -> Command<Message> {
-    Command::perform(initialize_hci_internal(), |result| match result {
+pub fn initialize_hci(adapter: Option<(u16, u16)>) -> Command<Message> {
+    Command::perform(initialize_hci_internal(adapter), |result| match result {
         Ok(hci) => Message::HciInitialized(hci),
         Err(e) => Message::HciFailure(e)
     })
 }
-async fn initialize_hci_internal() -> Result<Arc<Hci>, Error> {
-    let usb = spawn_blocking::<_, Result<UsbHost, Error>>(|| {
-        Ok(UsbController::list(|info| info.vendor_id() == 0x2B89 || info.vendor_id() == 0x10D7)?
+async fn initialize_hci_internal(adapter: Option<(u16, u16)>) -> Result<Arc<Hci>, Error> {
+    let usb = spawn_blocking::<_, Result<UsbHost, Error>>(move || {
+        Ok(UsbController::list(|info| adapter.is_none_or(|(vid, pid)| info.vendor_id() == vid && info.product_id() == pid))?
             .next()
             .ok_or(Error::Generic("No compatible USB controller found"))?
             .claim()?)

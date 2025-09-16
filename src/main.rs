@@ -99,6 +99,7 @@ fn main() -> iced::Result {
             ..Default::default()
         },
         fonts: vec![Cow::Borrowed(include_bytes!("../assets/microns.ttf").as_slice())],
+        flags: settings,
         ..Default::default()
     })
 }
@@ -113,6 +114,7 @@ enum Message {
 }
 
 struct App {
+    settings: AppSettings,
     state: State
 }
 
@@ -126,14 +128,16 @@ impl Application for App {
     type Executor = iced::executor::Default;
     type Message = Message;
     type Theme = iced::Theme;
-    type Flags = ();
+    type Flags = AppSettings;
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
+    fn new(settings: Self::Flags) -> (Self, Command<Self::Message>) {
+        let adapter = settings.bluetooth_adapter;
         (
             Self {
+                settings,
                 state: State::Initializing //State::Failed(Arc::new(hci::Error::Generic("HCI not initialized")))
             },
-            initialize_hci()
+            initialize_hci(adapter)
         )
     }
 
@@ -149,7 +153,7 @@ impl Application for App {
             }
             Message::HciInitialized(hci) => {
                 assert!(matches!(&self.state, State::Initializing | State::Failed(_)));
-                let (state, cmd) = Running::new(hci.clone());
+                let (state, cmd) = Running::new(hci.clone(), self.settings.volume_multiplier);
                 self.state = State::Running(state, true);
                 cmd.map(Message::Running)
             }

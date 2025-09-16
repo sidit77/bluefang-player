@@ -9,6 +9,8 @@ use crate::PROJECT_DIRS;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub bluetooth_adapter: Option<(u16, u16)>,
+    pub volume_multiplier: f32,
     pub hci_dump_enabled: bool,
     pub log_level: String
 }
@@ -16,6 +18,8 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            bluetooth_adapter: None,
+            volume_multiplier: 1.0,
             hci_dump_enabled: false,
             log_level: "info".to_string()
         }

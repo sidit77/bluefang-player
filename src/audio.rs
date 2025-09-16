@@ -1,5 +1,6 @@
 use std::array::from_fn;
 use std::iter::zip;
+use std::ops::Mul;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub struct SbcStreamHandler {
     resampler: FftFixedIn<f32>,
     decoder: Box<Decoder>,
     volume: Arc<AtomicF32>,
+    volume_multiplier: f32,
     decode_buffer_l: Vec<i16>,
     decode_buffer_r: Vec<i16>,
     input_buffers: [Vec<f32>; 2],
@@ -30,7 +32,7 @@ pub struct SbcStreamHandler {
 }
 
 impl SbcStreamHandler {
-    pub fn new(volume: Arc<AtomicF32>, capabilities: &[Capability]) -> Self {
+    pub fn new(volume: Arc<AtomicF32>, capabilities: &[Capability], volume_multiplier: f32) -> Self {
         let (source_frequency, input_size) = Self::parse_capabilities(capabilities).expect("Invalid capabilities");
 
         let audio_session = AudioSession::new();
@@ -47,6 +49,7 @@ impl SbcStreamHandler {
         Self {
             decoder: Box::new(Decoder::default()),
             volume,
+            volume_multiplier,
             decode_buffer_l: vec![0i16; Decoder::MAX_SAMPLES],
             decode_buffer_r: vec![0i16; Decoder::MAX_SAMPLES],
             input_buffers: from_fn(|_| vec![0f32; resampler.input_frames_max()]),
@@ -103,7 +106,7 @@ impl SbcStreamHandler {
                 .unwrap();
 
             self.interleave_buffer.clear();
-            let volume = self.volume.load(SeqCst).powi(2);
+            let volume = self.volume.load(SeqCst).mul(self.volume_multiplier).powi(2);
             for (&l, &r) in zip(&self.output_buffers[0], &self.output_buffers[1]).take(len) {
                 self.interleave_buffer.push((l * volume) as i16);
                 self.interleave_buffer.push((r * volume) as i16);

@@ -123,6 +123,7 @@ pub struct Running {
     connection_state: ConnectionState,
     paired_devices: BTreeMap<RemoteAddr, PairedDevice>,
     volume: Arc<AtomicF32>,
+    volume_multiplier: f32,
     remote_control_session: Option<RemoteControlSession>,
     server_command_sender: Option<UnboundedSender<ServerCommand>>
 }
@@ -130,12 +131,13 @@ pub struct Running {
 static PAIRED_DEVICES_PATH: Lazy<PathBuf> = Lazy::new(|| PROJECT_DIRS.data_dir().join("paired-devices.ron"));
 
 impl Running {
-    pub fn new(hci: Arc<Hci>) -> (Self, Command<Message>) {
+    pub fn new(hci: Arc<Hci>, volume_multiplier: f32) -> (Self, Command<Message>) {
         let state = Self {
             hci,
             connection_state: ConnectionState::Disconnected,
             paired_devices: Default::default(),
             volume: Arc::new(AtomicF32::new(1.0)),
+            volume_multiplier,
             remote_control_session: None,
             server_command_sender: None
         };
@@ -301,7 +303,7 @@ impl SubState for Running {
     fn subscription(&self) -> Subscription<Self::Message> {
         Subscription::batch([
             ConnectionEventWatcher::new(&self.hci).map(Message::ConnectionEvent),
-            self.create_l2cap_servers(),
+            self.create_l2cap_servers(self.volume_multiplier),
             self.remote_control_session
                 .as_ref()
                 .map(RemoteControlSession::subscription)
@@ -312,7 +314,7 @@ impl SubState for Running {
 }
 
 impl Running {
-    fn create_l2cap_servers(&self) -> Subscription<Message> {
+    fn create_l2cap_servers(&self, volume_multiplier: f32) -> Subscription<Message> {
         #[derive(Hash)]
         struct Id;
 
@@ -331,7 +333,7 @@ impl Running {
                         Capability::MediaCodec(SbcMediaCodecInformation::default().into()),
                     ],
                     //stream_handler_factory: Box::new(|cap| Box::new(FileDumpHandler::new())),
-                    factory: StreamHandlerFactory::new(cloned!([volume] move |cap| SbcStreamHandler::new(volume.clone(), cap)))
+                    factory: StreamHandlerFactory::new(cloned!([volume] move |cap| SbcStreamHandler::new(volume.clone(), cap, volume_multiplier)))
                 })
                 .build()
                 .into();
